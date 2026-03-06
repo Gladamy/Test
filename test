@@ -1,9 +1,8 @@
 --// Aurora UI Library
 --// A minimalistic, beautiful UI library for Roblox
---// Version: 7.0.0
---// Refactored: connection leaks fixed, keybind race condition resolved,
---//             element builders extracted, label refs cached, magic numbers
---//             named, outside-click-to-close on dropdowns added.
+--// Version: 8.0.0
+--// Added: SaveConfig/LoadConfig (writefile/readfile, JSON, all value types)
+--//        Tooltip support on every element (hover delay, fade-in, auto-position)
 
 local Aurora = {}
 local TweenService     = game:GetService("TweenService")
@@ -118,6 +117,194 @@ function Signal:Fire(...)
 end
 
 -- ─────────────────────────────────────────────
+--  Minimal JSON encoder / decoder
+--  No external dependencies. Handles the value
+--  types Aurora elements actually use:
+--    boolean, number, string,
+--    Color3  → stored as {__t="Color3",r,g,b}
+--    KeyCode → stored as {__t="KeyCode",name}
+--    array   → stored as JSON array
+-- ─────────────────────────────────────────────
+
+local JSON = {}
+
+local function jsonEncode(val)
+    local t = type(val)
+    if t == "boolean" then
+        return val and "true" or "false"
+    elseif t == "number" then
+        return tostring(val)
+    elseif t == "string" then
+        -- Escape special characters
+        val = val:gsub('\\', '\\\\')
+                 :gsub('"',  '\\"')
+                 :gsub('\n', '\\n')
+                 :gsub('\r', '\\r')
+                 :gsub('\t', '\\t')
+        return '"' .. val .. '"'
+    elseif t == "table" then
+        -- Check for userdata wrappers we inserted ourselves
+        if val.__t == "Color3" then
+            return string.format('{"__t":"Color3","r":%.6f,"g":%.6f,"b":%.6f}',
+                val.r, val.g, val.b)
+        elseif val.__t == "KeyCode" then
+            return string.format('{"__t":"KeyCode","name":"%s"}', val.name)
+        end
+        -- Plain array (sequential integer keys only)
+        local parts = {}
+        for i, v in ipairs(val) do
+            parts[i] = jsonEncode(v)
+        end
+        return "[" .. table.concat(parts, ",") .. "]"
+    else
+        return "null"
+    end
+end
+
+local function jsonDecode(s)
+    s = s:match("^%s*(.-)%s*$")   -- trim
+
+    if s == "true"  then return true  end
+    if s == "false" then return false end
+    if s == "null"  then return nil   end
+
+    -- Number
+    local num = tonumber(s)
+    if num then return num end
+
+    -- String
+    if s:sub(1,1) == '"' then
+        local inner = s:match('^"(.*)"$')
+        inner = inner:gsub('\\"', '"')
+                     :gsub('\\n', '\n')
+                     :gsub('\\r', '\r')
+                     :gsub('\\t', '\t')
+                     :gsub('\\\\', '\\')
+        return inner
+    end
+
+    -- Array  [ v, v, v ]
+    if s:sub(1,1) == "[" then
+        local body = s:match("^%[(.*)%]$")
+        local arr  = {}
+        if body and body ~= "" then
+            -- Simple single-level split on commas not inside {} or ""
+            -- Sufficient for the flat arrays Aurora saves (string arrays)
+            local depth = 0
+            local cur   = ""
+            for i = 1, #body do
+                local ch = body:sub(i, i)
+                if ch == "{" or ch == "[" then depth = depth + 1
+                elseif ch == "}" or ch == "]" then depth = depth - 1 end
+                if ch == "," and depth == 0 then
+                    arr[#arr + 1] = jsonDecode(cur:match("^%s*(.-)%s*$"))
+                    cur = ""
+                else
+                    cur = cur .. ch
+                end
+            end
+            if cur:match("%S") then
+                arr[#arr + 1] = jsonDecode(cur:match("^%s*(.-)%s*$"))
+            end
+        end
+        return arr
+    end
+
+    -- Object  { ... }
+    if s:sub(1,1) == "{" then
+        local body = s:match("^%{(.*)%}$")
+        local obj  = {}
+        if body and body ~= "" then
+            -- Split into key:value pairs respecting nesting
+            local depth  = 0
+            local inStr  = false
+            local cur    = ""
+            local pairs_ = {}
+            for i = 1, #body do
+                local ch = body:sub(i, i)
+                if ch == '"' and body:sub(i-1, i-1) ~= "\\" then
+                    inStr = not inStr
+                end
+                if not inStr then
+                    if ch == "{" or ch == "[" then depth = depth + 1
+                    elseif ch == "}" or ch == "]" then depth = depth - 1 end
+                end
+                if ch == "," and depth == 0 and not inStr then
+                    pairs_[#pairs_ + 1] = cur:match("^%s*(.-)%s*$")
+                    cur = ""
+                else
+                    cur = cur .. ch
+                end
+            end
+            if cur:match("%S") then
+                pairs_[#pairs_ + 1] = cur:match("^%s*(.-)%s*$")
+            end
+            for _, pair in ipairs(pairs_) do
+                local k, v = pair:match('^"([^"]+)"%s*:%s*(.+)$')
+                if k then obj[k] = jsonDecode(v) end
+            end
+        end
+        -- Re-hydrate Aurora-specific types
+        if obj.__t == "Color3" then
+            return Color3.new(obj.r or 0, obj.g or 0, obj.b or 0)
+        elseif obj.__t == "KeyCode" then
+            return Enum.KeyCode[obj.name] or Enum.KeyCode.Unknown
+        end
+        return obj
+    end
+
+    return nil
+end
+
+-- Wrap a Lua value into a JSON-serialisable form
+local function toJsonVal(v)
+    local t = typeof(v)
+    if t == "boolean" or t == "number" or t == "string" then
+        return v
+    elseif t == "Color3" then
+        return {__t = "Color3", r = v.R, g = v.G, b = v.B}
+    elseif t == "EnumItem" then   -- KeyCode
+        return {__t = "KeyCode", name = v.Name}
+    elseif t == "table" then
+        -- Assume plain string array (MultiSelect values)
+        local out = {}
+        for i, item in ipairs(v) do out[i] = toJsonVal(item) end
+        return out
+    end
+    return nil
+end
+
+JSON.encode = jsonEncode
+JSON.decode = jsonDecode
+JSON.wrap   = toJsonVal
+
+-- ─────────────────────────────────────────────
+--  Config persistence
+--  Uses executor's writefile / readfile.
+--  Falls back silently if not available.
+-- ─────────────────────────────────────────────
+
+-- Checks whether executor filesystem APIs exist
+local function fsAvailable()
+    return type(writefile) == "function" and type(readfile) == "function"
+end
+
+-- Loads the stored table for a given filename, or {} on miss/error
+local function loadFile(path)
+    if not fsAvailable() then return {} end
+    local ok, raw = pcall(readfile, path)
+    if not ok or type(raw) ~= "string" or raw == "" then return {} end
+    local decoded = jsonDecode(raw)
+    return type(decoded) == "table" and decoded or {}
+end
+
+-- Saves a table to a file as JSON
+local function saveFile(path, tbl)
+    if not fsAvailable() then return end
+    pcall(writefile, path, jsonEncode(tbl))
+end
+
+-- ─────────────────────────────────────────────
 --  Utility
 -- ─────────────────────────────────────────────
 
@@ -224,6 +411,47 @@ function Aurora:CreateWindow(config)
 
     -- Collect every persistent connection so they can all be torn down on close
     local windowConnections = {}
+
+    -- ── Config persistence ────────────────────────────────────────────────
+    -- configFile: path passed in config.ConfigFile, e.g. "MyScript_config.json"
+    -- loadedData: the table read from disk at window creation time; elements
+    --             with a matching Key read their saved value from here.
+    local configFile  = config.ConfigFile or nil
+    local configData  = configFile and loadFile(configFile) or {}
+    local saveData    = {}   -- accumulates current values from keyed elements
+
+    -- Call after any value changes to flush to disk immediately
+    local function PersistSave()
+        if configFile then saveFile(configFile, saveData) end
+    end
+
+    -- Public: overwrite the file right now with current element values
+    -- (also called automatically on every element change when ConfigFile set)
+    local function SaveConfig()
+        if not configFile then
+            warn("[Aurora] SaveConfig: no ConfigFile set on this window.")
+            return
+        end
+        saveFile(configFile, saveData)
+    end
+
+    -- Public: re-read the file and push values back into every registered
+    -- element.  Elements register a _loadFn when they have a Key.
+    local elementLoaders = {}   -- key → function(value)
+
+    local function LoadConfig()
+        if not configFile then
+            warn("[Aurora] LoadConfig: no ConfigFile set on this window.")
+            return
+        end
+        local fresh = loadFile(configFile)
+        for key, fn in pairs(elementLoaders) do
+            if fresh[key] ~= nil then
+                pcall(fn, fresh[key])
+                saveData[key] = fresh[key]
+            end
+        end
+    end
 
     local ScreenGui = Create("ScreenGui", {
         Name           = "AuroraUI",
@@ -406,6 +634,8 @@ function Aurora:CreateWindow(config)
         Tabs             = {},
         ActiveTab        = nil,
         OnTabChanged     = Signal.new(),  -- fires (newTab, oldTab)
+        SaveConfig       = SaveConfig,
+        LoadConfig       = LoadConfig,
     }
 
     function Window:SelectTab(index)
@@ -437,13 +667,47 @@ function Aurora:CreateWindow(config)
         return f
     end
 
-    -- Attaches Destroy / SetVisible / SetEnabled to every element table
-    local function RegisterElement(tab, emptyState, element, frame)
+    -- Attaches Destroy / SetVisible / SetEnabled / tooltip / config to every element
+    local function RegisterElement(tab, emptyState, element, frame, cfg)
+        cfg = cfg or {}
         if #tab.Elements == 0 then
             emptyState.Visible = false
         end
         table.insert(tab.Elements, element)
         tab.OnElementAdded:Fire(element)
+
+        -- ── Tooltip ───────────────────────────────────────────────────────
+        if cfg.Tooltip and cfg.Tooltip ~= "" then
+            AttachTooltip(frame, cfg.Tooltip)
+        end
+
+        -- ── Config persistence ────────────────────────────────────────────
+        -- If the element has a Key and a GetValue/SetValue, hook it up.
+        if cfg.Key and element.GetValue and element.SetValue then
+            local key = cfg.Key
+
+            -- Load saved value immediately if one exists
+            if configData[key] ~= nil then
+                pcall(element.SetValue, configData[key])
+                saveData[key] = configData[key]
+            elseif element.GetValue then
+                -- Seed saveData with the element's current default
+                saveData[key] = JSON.wrap(element.GetValue())
+            end
+
+            -- Register loader for LoadConfig()
+            elementLoaders[key] = function(val)
+                pcall(element.SetValue, val)
+            end
+
+            -- Wrap OnChanged to auto-save on every change
+            if element.OnChanged then
+                element.OnChanged:Connect(function(val)
+                    saveData[key] = JSON.wrap(val)
+                    PersistSave()
+                end)
+            end
+        end
 
         element.Destroy = function()
             frame:Destroy()
@@ -458,8 +722,6 @@ function Aurora:CreateWindow(config)
         end
 
         -- Dims + overlays when disabled; restores when re-enabled.
-        -- FIX: color is cached as Color3 (not hex string) to avoid repeated
-        --      string conversion on restore.
         element.SetEnabled = function(enabled)
             local overlay = frame:FindFirstChild("_DisabledOverlay")
             if enabled then
@@ -469,7 +731,6 @@ function Aurora:CreateWindow(config)
                     if lbl:IsA("TextLabel") or lbl:IsA("TextButton") or lbl:IsA("TextBox") then
                         local stored = lbl:GetAttribute("_origColor")
                         if stored then
-                            -- Attribute stores "R,G,B" as comma-separated floats
                             local r, g, b = stored:match("([^,]+),([^,]+),([^,]+)")
                             lbl.TextColor3 = Color3.new(tonumber(r), tonumber(g), tonumber(b))
                         end
@@ -530,8 +791,95 @@ function Aurora:CreateWindow(config)
         return conn
     end
 
-    -- ─────────────────────────────────────────────────────────────────────
-    --  Individual element builders
+    -- ── Tooltip helper ────────────────────────────────────────────────────
+    -- Attaches a hover tooltip to any GuiObject.
+    -- The tooltip floats above the element (flips below if too close to top).
+    -- A 0.5s hover delay prevents it flashing on fast mouse passes.
+    local tooltipFrame do
+        tooltipFrame = Create("Frame", {
+            Name                   = "_AuroraTooltip",
+            Parent                 = ScreenGui,
+            Size                   = UDim2.new(0, 10, 0, 26),  -- resized by text
+            BackgroundColor3       = Aurora.Config.Theme.Surface,
+            BorderSizePixel        = 0,
+            Visible                = false,
+            ZIndex                 = 200,
+        })
+        AddCorner(tooltipFrame, UDim.new(0, 4))
+        Create("UIStroke", {
+            Parent          = tooltipFrame,
+            Color           = Aurora.Config.Theme.Border,
+            Thickness       = 1,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        })
+        Create("UIPadding", {
+            Parent       = tooltipFrame,
+            PaddingLeft  = UDim.new(0, 8),
+            PaddingRight = UDim.new(0, 8),
+            PaddingTop   = UDim.new(0, 4),
+            PaddingBottom = UDim.new(0, 4),
+        })
+        local tooltipLabel = Create("TextLabel", {
+            Name                   = "Label",
+            Parent                 = tooltipFrame,
+            Size                   = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            Text                   = "",
+            TextColor3             = Aurora.Config.Theme.TextMuted,
+            Font                   = Aurora.Config.Font,
+            TextSize               = 12,
+            TextWrapped            = false,
+            ZIndex                 = 201,
+        })
+        -- Keep a reference on the frame so AttachTooltip can update text
+        tooltipFrame._label = tooltipLabel
+    end
+
+    -- Moves the shared tooltip frame near the given GuiObject
+    local function PositionTooltip(anchor)
+        local ap  = anchor.AbsolutePosition
+        local as  = anchor.AbsoluteSize
+        local ts  = tooltipFrame.AbsoluteSize
+        local vpY = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize.Y or 800
+        local x   = ap.X
+        local y   = ap.Y - ts.Y - 6          -- default: above the element
+        if y < 4 then
+            y = ap.Y + as.Y + 6              -- flip below if too close to top
+        end
+        tooltipFrame.Position = UDim2.new(0, x, 0, y)
+    end
+
+    -- Attach a tooltip string to any GuiObject.
+    -- Called from RegisterElement when cfg.Tooltip is set.
+    local tooltipThread   -- the pending show-delay coroutine
+    local function AttachTooltip(anchor, text)
+        anchor.MouseEnter:Connect(function()
+            tooltipThread = task.delay(0.5, function()
+                tooltipFrame._label.Text = text
+                -- Size the frame to fit the text
+                local textSize = game:GetService("TextService"):GetTextSize(
+                    text, 12, Aurora.Config.Font, Vector2.new(400, 100))
+                tooltipFrame.Size = UDim2.new(0, textSize.X + 16, 0, textSize.Y + 8)
+                PositionTooltip(anchor)
+                tooltipFrame.Visible               = true
+                tooltipFrame.BackgroundTransparency = 1
+                Tween(tooltipFrame, {BackgroundTransparency = 0}, 0.15)
+            end)
+        end)
+        anchor.MouseLeave:Connect(function()
+            if tooltipThread then
+                task.cancel(tooltipThread)
+                tooltipThread = nil
+            end
+            tooltipFrame.Visible = false
+        end)
+        -- Also hide on any mouse click so tooltip doesn't linger after interaction
+        anchor.InputBegan:Connect(function(inp)
+            if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+                tooltipFrame.Visible = false
+            end
+        end)
+    end
     --  Each receives (tabContent, cfg) and returns a raw element table.
     --  Tab:CreateXxx() calls the builder then RegisterElement().
     -- ─────────────────────────────────────────────────────────────────────
@@ -2103,67 +2451,67 @@ function Aurora:CreateWindow(config)
 
         function Tab:CreateButton(cfg)
             local el, frame = Builders.Button(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame)
+            return RegisterElement(Tab, EmptyState, el, frame, cfg)
         end
 
         function Tab:CreateToggle(cfg)
             local el, frame = Builders.Toggle(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame)
+            return RegisterElement(Tab, EmptyState, el, frame, cfg)
         end
 
         function Tab:CreateSlider(cfg)
             local el, frame = Builders.Slider(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame)
+            return RegisterElement(Tab, EmptyState, el, frame, cfg)
         end
 
         function Tab:CreateDropdown(cfg)
             local el, frame = Builders.Dropdown(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame)
+            return RegisterElement(Tab, EmptyState, el, frame, cfg)
         end
 
         function Tab:CreateSearchDropdown(cfg)
             local el, frame = Builders.SearchDropdown(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame)
+            return RegisterElement(Tab, EmptyState, el, frame, cfg)
         end
 
         function Tab:CreateMultiSelect(cfg)
             local el, frame = Builders.MultiSelect(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame)
+            return RegisterElement(Tab, EmptyState, el, frame, cfg)
         end
 
         function Tab:CreateInput(cfg)
             local el, frame = Builders.Input(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame)
+            return RegisterElement(Tab, EmptyState, el, frame, cfg)
         end
 
         function Tab:CreateNumberInput(cfg)
             local el, frame = Builders.NumberInput(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame)
+            return RegisterElement(Tab, EmptyState, el, frame, cfg)
         end
 
         function Tab:CreateKeybind(cfg)
             local el, frame = Builders.Keybind(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame)
+            return RegisterElement(Tab, EmptyState, el, frame, cfg)
         end
 
         function Tab:CreateColorPicker(cfg)
             local el, frame = Builders.ColorPicker(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame)
+            return RegisterElement(Tab, EmptyState, el, frame, cfg)
         end
 
         function Tab:CreateLabel(text)
             local el, frame = Builders.Label(TabContent, text)
-            return RegisterElement(Tab, EmptyState, el, frame)
+            return RegisterElement(Tab, EmptyState, el, frame, {})
         end
 
         function Tab:CreateSection(sectionText)
             local el, frame = Builders.Section(TabContent, sectionText)
-            return RegisterElement(Tab, EmptyState, el, frame)
+            return RegisterElement(Tab, EmptyState, el, frame, {})
         end
 
         function Tab:CreateTable(cfg)
             local el, frame = Builders.Table(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame)
+            return RegisterElement(Tab, EmptyState, el, frame, cfg)
         end
 
         -- Auto-select first tab
