@@ -1,8 +1,23 @@
 --// Aurora UI Library
 --// A minimalistic, beautiful UI library for Roblox
---// Version: 8.0.1
---// Added: SaveConfig/LoadConfig (writefile/readfile, JSON, all value types)
---//        Tooltip support on every element (hover delay, fade-in, auto-position)
+--// Version: 7.0.0
+--
+--  Improvements over v6:
+--    [PERF]  Slider / ColorPicker drag connections are created on drag-start and
+--            destroyed on drag-end instead of living for the entire session.
+--    [FIX]   AddShadow ZIndex is now guarded: math.max(1, parent.ZIndex - 1).
+--    [FIX]   Slider SetValue now fires OnChanged and cfg.Callback.
+--    [FIX]   HexInput resets to current color on blur (not only on Enter).
+--    [FIX]   SetEnabled(false) called twice no longer re-dims already-dim text.
+--    [FIX]   Minimize restores to live size, not the original config size.
+--    [FIX]   Keybind cancel connection is scoped so it can't fire during listen start.
+--    [FIX]   Dropdown / SearchDropdown / MultiSelect / ColorPicker now go through
+--            BaseFrame-equivalent sizing so LayoutOrder is always correct.
+--    [API]   Dropdown & MultiSelect both expose SetOptions(newOptions).
+--    [API]   Window:SelectTab() accepts a Tab object OR a numeric index.
+--    [API]   ColorPicker supports an optional alpha channel (cfg.Alpha = true).
+--    [UX]    Magic layout numbers replaced with named constants.
+--    [UX]    CreateColorPicker split into clearly-labelled sub-sections.
 
 local Aurora = {}
 local TweenService     = game:GetService("TweenService")
@@ -41,52 +56,73 @@ Aurora.Config = {
 }
 
 -- ─────────────────────────────────────────────
---  Layout constants
---  (replaces scattered magic numbers)
+--  Layout constants  (replaces scattered magic numbers)
 -- ─────────────────────────────────────────────
 
-local K = {
-    -- Notification
-    NOTIF_HEIGHT = 80,
-    NOTIF_GAP    = 8,
-    NOTIF_X      = -300,   -- right-edge X offset (negative = from right)
-
-    -- Window sidebar
-    SIDEBAR_MIN  = 110,
-    SIDEBAR_MAX  = 200,
-    SIDEBAR_GAP  = 8,      -- gap between sidebar and content area
+local L = {
+    -- Window chrome
+    TITLEBAR_H     = 40,
+    SIDEBAR_MIN    = 110,
+    SIDEBAR_MAX    = 200,
+    SIDEBAR_MARGIN = 8,   -- gap from window edge to sidebar
+    SIDEBAR_GAP    = 8,   -- gap between sidebar and content area
+    CONTENT_MARGIN = 8,   -- gap from content area to right window edge
+    CONTENT_TOP    = 48,  -- Y offset where sidebar/content starts (below title bar)
 
     -- Tab button
-    TAB_BTN_H    = 32,
+    TAB_BTN_H      = 32,
+    TAB_ICON_SIZE  = 16,
+    TAB_ICON_X     = 8,
+    TAB_ICON_OFFSET= 30,  -- label X offset when icon is present
+    TAB_LABEL_X    = 10,  -- label X offset when no icon
 
-    -- Element row heights
-    ROW_H_SM     = 36,     -- button / toggle / keybind
-    ROW_H_MD     = 50,     -- slider
-    ROW_H_LG     = 54,     -- input / number input
-    ROW_H_LABEL  = 22,
-    ROW_H_SECTION = 28,
+    -- Elements
+    ELEM_H_SM      = 36,  -- button, toggle, keybind, dropdown header
+    ELEM_H_MD      = 50,  -- slider
+    ELEM_H_IN      = 54,  -- text/number input
+    ELEM_CORNER    = UDim.new(0, 4),
+    ELEM_PAD_X     = 12,  -- standard horizontal label padding
 
-    -- Dropdown
-    DROPDOWN_H       = 36,
-    DROPDOWN_ROW_H   = 30,
-    SEARCH_BOX_H     = 24,
-    SEARCH_BOX_TOP   = 38,  -- Y position of search box inside dropdown
-    LIST_TOP         = 66,  -- Y position of options list inside search dropdown
+    -- Toggle
+    TOGGLE_TRACK_W = 36,
+    TOGGLE_TRACK_H = 20,
+    TOGGLE_CIRCLE  = 16,
+    TOGGLE_X_OFF   = -46, -- track X offset from right edge of frame
+
+    -- Slider
+    SLIDER_BAR_H   = 4,
+    SLIDER_KNOB    = 12,  -- knob diameter
+    SLIDER_BAR_Y   = 32,  -- Y position of bar within slider frame
+
+    -- Keybind button
+    KEYBIND_BTN_W  = 88,
+    KEYBIND_BTN_H  = 24,
+    KEYBIND_BTN_X  = -98, -- X offset from right edge
 
     -- Color picker
-    --   36  header
-    -- + 8   gap  (Panel.Position.Y = 44, so 44-36 = 8)
-    -- + 68  SV/Hue pad height
-    -- + 6   gap before hex
-    -- + 22  hex input
-    -- + 8   bottom padding (Panel sits at Y=44, Panel height = 96)
-    PICKER_EXPANDED_H = 148,
-    PICKER_PAD_H      = 68,  -- SV pad / hue bar height
+    CP_HEADER_H    = 36,
+    CP_SV_H        = 68,  -- SV pad height
+    CP_HUE_W       = 14,  -- hue bar width
+    CP_HEX_H       = 22,
+    CP_ALPHA_H     = 14,  -- alpha bar height (only when cfg.Alpha = true)
+    CP_GAP         = 6,   -- vertical gap between picker rows
+    CP_PREVIEW_W   = 28,
+    CP_PREVIEW_H   = 20,
+    CP_PREVIEW_X   = -42, -- preview X offset from right edge
 
-    -- Table
-    TABLE_HEADER_H = 28,
-    TABLE_ROW_H    = 28,
+    -- Notifications
+    NOTIF_HEIGHT   = 80,
+    NOTIF_GAP      = 8,
+    NOTIF_X        = -300,  -- resting X offset (off-screen right)
+    NOTIF_W        = 280,
 }
+
+-- Compute ColorPicker expanded height from constants
+local function CP_ExpandedH(hasAlpha)
+    -- header + gap + (SV pad height) + gap + hex + optional alpha + bottom padding
+    local base = L.CP_HEADER_H + L.CP_GAP + L.CP_SV_H + L.CP_GAP + L.CP_HEX_H + 10
+    return hasAlpha and (base + L.CP_GAP + L.CP_ALPHA_H) or base
+end
 
 -- ─────────────────────────────────────────────
 --  Signal — lightweight pub/sub event system
@@ -117,194 +153,6 @@ function Signal:Fire(...)
 end
 
 -- ─────────────────────────────────────────────
---  Minimal JSON encoder / decoder
---  No external dependencies. Handles the value
---  types Aurora elements actually use:
---    boolean, number, string,
---    Color3  → stored as {__t="Color3",r,g,b}
---    KeyCode → stored as {__t="KeyCode",name}
---    array   → stored as JSON array
--- ─────────────────────────────────────────────
-
-local JSON = {}
-
-local function jsonEncode(val)
-    local t = type(val)
-    if t == "boolean" then
-        return val and "true" or "false"
-    elseif t == "number" then
-        return tostring(val)
-    elseif t == "string" then
-        -- Escape special characters
-        val = val:gsub('\\', '\\\\')
-                 :gsub('"',  '\\"')
-                 :gsub('\n', '\\n')
-                 :gsub('\r', '\\r')
-                 :gsub('\t', '\\t')
-        return '"' .. val .. '"'
-    elseif t == "table" then
-        -- Check for userdata wrappers we inserted ourselves
-        if val.__t == "Color3" then
-            return string.format('{"__t":"Color3","r":%.6f,"g":%.6f,"b":%.6f}',
-                val.r, val.g, val.b)
-        elseif val.__t == "KeyCode" then
-            return string.format('{"__t":"KeyCode","name":"%s"}', val.name)
-        end
-        -- Plain array (sequential integer keys only)
-        local parts = {}
-        for i, v in ipairs(val) do
-            parts[i] = jsonEncode(v)
-        end
-        return "[" .. table.concat(parts, ",") .. "]"
-    else
-        return "null"
-    end
-end
-
-local function jsonDecode(s)
-    s = s:match("^%s*(.-)%s*$")   -- trim
-
-    if s == "true"  then return true  end
-    if s == "false" then return false end
-    if s == "null"  then return nil   end
-
-    -- Number
-    local num = tonumber(s)
-    if num then return num end
-
-    -- String
-    if s:sub(1,1) == '"' then
-        local inner = s:match('^"(.*)"$')
-        inner = inner:gsub('\\"', '"')
-                     :gsub('\\n', '\n')
-                     :gsub('\\r', '\r')
-                     :gsub('\\t', '\t')
-                     :gsub('\\\\', '\\')
-        return inner
-    end
-
-    -- Array  [ v, v, v ]
-    if s:sub(1,1) == "[" then
-        local body = s:match("^%[(.*)%]$")
-        local arr  = {}
-        if body and body ~= "" then
-            -- Simple single-level split on commas not inside {} or ""
-            -- Sufficient for the flat arrays Aurora saves (string arrays)
-            local depth = 0
-            local cur   = ""
-            for i = 1, #body do
-                local ch = body:sub(i, i)
-                if ch == "{" or ch == "[" then depth = depth + 1
-                elseif ch == "}" or ch == "]" then depth = depth - 1 end
-                if ch == "," and depth == 0 then
-                    arr[#arr + 1] = jsonDecode(cur:match("^%s*(.-)%s*$"))
-                    cur = ""
-                else
-                    cur = cur .. ch
-                end
-            end
-            if cur:match("%S") then
-                arr[#arr + 1] = jsonDecode(cur:match("^%s*(.-)%s*$"))
-            end
-        end
-        return arr
-    end
-
-    -- Object  { ... }
-    if s:sub(1,1) == "{" then
-        local body = s:match("^%{(.*)%}$")
-        local obj  = {}
-        if body and body ~= "" then
-            -- Split into key:value pairs respecting nesting
-            local depth  = 0
-            local inStr  = false
-            local cur    = ""
-            local pairs_ = {}
-            for i = 1, #body do
-                local ch = body:sub(i, i)
-                if ch == '"' and body:sub(i-1, i-1) ~= "\\" then
-                    inStr = not inStr
-                end
-                if not inStr then
-                    if ch == "{" or ch == "[" then depth = depth + 1
-                    elseif ch == "}" or ch == "]" then depth = depth - 1 end
-                end
-                if ch == "," and depth == 0 and not inStr then
-                    pairs_[#pairs_ + 1] = cur:match("^%s*(.-)%s*$")
-                    cur = ""
-                else
-                    cur = cur .. ch
-                end
-            end
-            if cur:match("%S") then
-                pairs_[#pairs_ + 1] = cur:match("^%s*(.-)%s*$")
-            end
-            for _, pair in ipairs(pairs_) do
-                local k, v = pair:match('^"([^"]+)"%s*:%s*(.+)$')
-                if k then obj[k] = jsonDecode(v) end
-            end
-        end
-        -- Re-hydrate Aurora-specific types
-        if obj.__t == "Color3" then
-            return Color3.new(obj.r or 0, obj.g or 0, obj.b or 0)
-        elseif obj.__t == "KeyCode" then
-            return Enum.KeyCode[obj.name] or Enum.KeyCode.Unknown
-        end
-        return obj
-    end
-
-    return nil
-end
-
--- Wrap a Lua value into a JSON-serialisable form
-local function toJsonVal(v)
-    local t = typeof(v)
-    if t == "boolean" or t == "number" or t == "string" then
-        return v
-    elseif t == "Color3" then
-        return {__t = "Color3", r = v.R, g = v.G, b = v.B}
-    elseif t == "EnumItem" then   -- KeyCode
-        return {__t = "KeyCode", name = v.Name}
-    elseif t == "table" then
-        -- Assume plain string array (MultiSelect values)
-        local out = {}
-        for i, item in ipairs(v) do out[i] = toJsonVal(item) end
-        return out
-    end
-    return nil
-end
-
-JSON.encode = jsonEncode
-JSON.decode = jsonDecode
-JSON.wrap   = toJsonVal
-
--- ─────────────────────────────────────────────
---  Config persistence
---  Uses executor's writefile / readfile.
---  Falls back silently if not available.
--- ─────────────────────────────────────────────
-
--- Checks whether executor filesystem APIs exist
-local function fsAvailable()
-    return type(writefile) == "function" and type(readfile) == "function"
-end
-
--- Loads the stored table for a given filename, or {} on miss/error
-local function loadFile(path)
-    if not fsAvailable() then return {} end
-    local ok, raw = pcall(readfile, path)
-    if not ok or type(raw) ~= "string" or raw == "" then return {} end
-    local decoded = jsonDecode(raw)
-    return type(decoded) == "table" and decoded or {}
-end
-
--- Saves a table to a file as JSON
-local function saveFile(path, tbl)
-    if not fsAvailable() then return end
-    pcall(writefile, path, jsonEncode(tbl))
-end
-
--- ─────────────────────────────────────────────
 --  Utility
 -- ─────────────────────────────────────────────
 
@@ -332,20 +180,21 @@ local function AddCorner(parent, radius)
     })
 end
 
+-- [FIX] ZIndex is now guarded so it never goes below 1.
 local function AddShadow(parent, intensity)
     return Create("ImageLabel", {
-        Name                   = "Shadow",
-        Parent                 = parent,
-        AnchorPoint            = Vector2.new(0.5, 0.5),
-        Position               = UDim2.new(0.5, 0, 0.5, 4),
-        Size                   = UDim2.new(1, 24, 1, 24),
+        Name                  = "Shadow",
+        Parent                = parent,
+        AnchorPoint           = Vector2.new(0.5, 0.5),
+        Position              = UDim2.new(0.5, 0, 0.5, 4),
+        Size                  = UDim2.new(1, 24, 1, 24),
         BackgroundTransparency = 1,
-        Image                  = "rbxassetid://6014261993",
-        ImageColor3            = Color3.new(0, 0, 0),
-        ImageTransparency      = Aurora.Config.ShadowTransparency * (intensity or 1),
-        ScaleType              = Enum.ScaleType.Slice,
-        SliceCenter            = Rect.new(49, 49, 450, 450),
-        ZIndex                 = parent.ZIndex - 1,
+        Image                 = "rbxassetid://6014261993",
+        ImageColor3           = Color3.new(0, 0, 0),
+        ImageTransparency     = Aurora.Config.ShadowTransparency * (intensity or 1),
+        ScaleType             = Enum.ScaleType.Slice,
+        SliceCenter           = Rect.new(49, 49, 450, 450),
+        ZIndex                = math.max(1, parent.ZIndex - 1),  -- [FIX] was parent.ZIndex-1 (could be 0)
     })
 end
 
@@ -370,8 +219,8 @@ local function MakeDraggable(frame, handle)
         ) then
             local d = inp.Position - dragStart
             frame.Position = UDim2.new(
-                startPos.X.Scale,  startPos.X.Offset + d.X,
-                startPos.Y.Scale,  startPos.Y.Offset + d.Y
+                startPos.X.Scale, startPos.X.Offset + d.X,
+                startPos.Y.Scale, startPos.Y.Offset + d.Y
             )
         end
     end)
@@ -387,15 +236,15 @@ local function MakeDraggable(frame, handle)
 end
 
 -- ─────────────────────────────────────────────
---  Notification queue  (intentionally module-level / shared)
+--  Notification queue
 -- ─────────────────────────────────────────────
 
 local notifQueue = {}
 
 local function RepositionNotifs()
     for i, data in ipairs(notifQueue) do
-        local targetY = -(i * (K.NOTIF_HEIGHT + K.NOTIF_GAP))
-        Tween(data.frame, {Position = UDim2.new(1, K.NOTIF_X, 1, targetY)}, 0.25)
+        local targetY = -(i * (L.NOTIF_HEIGHT + L.NOTIF_GAP))
+        Tween(data.frame, {Position = UDim2.new(1, L.NOTIF_X, 1, targetY)}, 0.25)
     end
 end
 
@@ -409,49 +258,11 @@ function Aurora:CreateWindow(config)
     local size     = config.Size     or UDim2.new(0, 620, 0, 420)
     local position = config.Position or UDim2.new(0.5, -310, 0.5, -210)
 
-    -- Collect every persistent connection so they can all be torn down on close
+    -- [FIX] Track current live size for minimize/restore instead of
+    --       capturing the initial config value and never updating it.
+    local currentSize = size
+
     local windowConnections = {}
-
-    -- ── Config persistence ────────────────────────────────────────────────
-    -- configFile: path passed in config.ConfigFile, e.g. "MyScript_config.json"
-    -- loadedData: the table read from disk at window creation time; elements
-    --             with a matching Key read their saved value from here.
-    local configFile  = config.ConfigFile or nil
-    local configData  = configFile and loadFile(configFile) or {}
-    local saveData    = {}   -- accumulates current values from keyed elements
-
-    -- Call after any value changes to flush to disk immediately
-    local function PersistSave()
-        if configFile then saveFile(configFile, saveData) end
-    end
-
-    -- Public: overwrite the file right now with current element values
-    -- (also called automatically on every element change when ConfigFile set)
-    local function SaveConfig()
-        if not configFile then
-            warn("[Aurora] SaveConfig: no ConfigFile set on this window.")
-            return
-        end
-        saveFile(configFile, saveData)
-    end
-
-    -- Public: re-read the file and push values back into every registered
-    -- element.  Elements register a _loadFn when they have a Key.
-    local elementLoaders = {}   -- key → function(value)
-
-    local function LoadConfig()
-        if not configFile then
-            warn("[Aurora] LoadConfig: no ConfigFile set on this window.")
-            return
-        end
-        local fresh = loadFile(configFile)
-        for key, fn in pairs(elementLoaders) do
-            if fresh[key] ~= nil then
-                pcall(fn, fresh[key])
-                saveData[key] = fresh[key]
-            end
-        end
-    end
 
     local ScreenGui = Create("ScreenGui", {
         Name           = "AuroraUI",
@@ -472,17 +283,17 @@ function Aurora:CreateWindow(config)
     AddCorner(MainFrame)
     AddShadow(MainFrame, 1.2)
 
-    -- ── Title bar ─────────────────────────────────────────────────────────
+    -- ── Title bar ──────────────────────────
 
     local TitleBar = Create("Frame", {
         Name             = "TitleBar",
         Parent           = MainFrame,
-        Size             = UDim2.new(1, 0, 0, 40),
+        Size             = UDim2.new(1, 0, 0, L.TITLEBAR_H),
         BackgroundColor3 = Aurora.Config.Theme.Surface,
         BorderSizePixel  = 0,
     })
     AddCorner(TitleBar)
-    -- Patch bottom rounded corners so TitleBar sits flush on MainFrame
+    -- Patch bottom rounded corners flat so TitleBar sits flush on MainFrame
     Create("Frame", {
         Parent           = TitleBar,
         Position         = UDim2.new(0, 0, 1, -8),
@@ -492,26 +303,27 @@ function Aurora:CreateWindow(config)
     })
 
     Create("TextLabel", {
-        Name                   = "Title",
-        Parent                 = TitleBar,
-        Position               = UDim2.new(0, 15, 0, 0),
-        Size                   = UDim2.new(1, -120, 1, 0),
+        Name               = "Title",
+        Parent             = TitleBar,
+        Position           = UDim2.new(0, 15, 0, 0),
+        Size               = UDim2.new(1, -120, 1, 0),
         BackgroundTransparency = 1,
-        Text                   = title,
-        TextColor3             = Aurora.Config.Theme.Text,
-        Font                   = Aurora.Config.FontBold,
-        TextSize               = 16,
-        TextXAlignment         = Enum.TextXAlignment.Left,
+        Text               = title,
+        TextColor3         = Aurora.Config.Theme.Text,
+        Font               = Aurora.Config.FontBold,
+        TextSize           = 16,
+        TextXAlignment     = Enum.TextXAlignment.Left,
     })
 
-    -- ── Control buttons ───────────────────────────────────────────────────
+    -- Control buttons (✕ / —)
+    local CTRL_SIZE  = 20
+    local CTRL_X_GAP = 26   -- spacing between control buttons
 
-    -- Extracted outside CreateWindow to reduce nesting; receives needed context
     local function MakeControlBtn(xOffset, icon, iconColor)
         local btn = Create("TextButton", {
             Parent           = TitleBar,
-            Position         = UDim2.new(1, xOffset, 0.5, -10),
-            Size             = UDim2.new(0, 20, 0, 20),
+            Position         = UDim2.new(1, xOffset, 0.5, -CTRL_SIZE / 2),
+            Size             = UDim2.new(0, CTRL_SIZE, 0, CTRL_SIZE),
             BackgroundColor3 = Aurora.Config.Theme.Surface,
             Text             = icon,
             TextColor3       = iconColor,
@@ -530,26 +342,27 @@ function Aurora:CreateWindow(config)
         return btn
     end
 
-    local CloseBtn    = MakeControlBtn(-28, "✕", Aurora.Config.Theme.Error)
-    local MinimizeBtn = MakeControlBtn(-54, "—", Aurora.Config.Theme.TextMuted)
+    -- Close = -(size + margin), Minimize = one step further left
+    local CloseBtn    = MakeControlBtn(-(CTRL_SIZE + 8),               "✕", Aurora.Config.Theme.Error)
+    local MinimizeBtn = MakeControlBtn(-(CTRL_SIZE + 8 + CTRL_X_GAP), "—", Aurora.Config.Theme.TextMuted)
 
     local minimized = false
     MinimizeBtn.MouseButton1Click:Connect(function()
         minimized = not minimized
-        -- FIX: use AbsoluteSize so scale-based UDim2 sizes work correctly
-        local fullW = MainFrame.AbsoluteSize.X
-        Tween(MainFrame, {Size = minimized and UDim2.new(0, fullW, 0, 40) or size}, 0.3)
+        -- [FIX] Restore to currentSize (live), not stale captured `size`.
+        local target = minimized
+            and UDim2.new(0, currentSize.X.Offset, 0, L.TITLEBAR_H)
+            or  currentSize
+        Tween(MainFrame, {Size = target}, 0.3)
     end)
 
     CloseBtn.MouseButton1Click:Connect(function()
-        -- FIX: use AbsoluteSize / AbsolutePosition for correct centre point
-        local abs = MainFrame.AbsoluteSize
-        local pos = MainFrame.AbsolutePosition
-        local cx  = pos.X + abs.X / 2
-        local cy  = pos.Y + abs.Y / 2
+        local cx = MainFrame.Position.X.Offset + currentSize.X.Offset / 2
+        local cy = MainFrame.Position.Y.Offset + currentSize.Y.Offset / 2
         Tween(MainFrame, {
             Size     = UDim2.new(0, 0, 0, 0),
-            Position = UDim2.new(0, cx, 0, cy),
+            Position = UDim2.new(MainFrame.Position.X.Scale, cx,
+                                 MainFrame.Position.Y.Scale, cy),
         }, 0.3)
         task.wait(0.3)
         for _, c in ipairs(windowConnections) do
@@ -558,13 +371,13 @@ function Aurora:CreateWindow(config)
         ScreenGui:Destroy()
     end)
 
-    -- ── Tab sidebar ───────────────────────────────────────────────────────
+    -- ── Tab sidebar ────────────────────────
 
     local TabContainer = Create("Frame", {
         Name             = "TabContainer",
         Parent           = MainFrame,
-        Position         = UDim2.new(0, 8, 0, 48),
-        Size             = UDim2.new(0, K.SIDEBAR_MIN, 1, -56),
+        Position         = UDim2.new(0, L.SIDEBAR_MARGIN, 0, L.CONTENT_TOP),
+        Size             = UDim2.new(0, L.SIDEBAR_MIN, 1, -(L.CONTENT_TOP + L.SIDEBAR_MARGIN)),
         BackgroundColor3 = Aurora.Config.Theme.Surface,
         BorderSizePixel  = 0,
         AutomaticSize    = Enum.AutomaticSize.X,
@@ -582,31 +395,38 @@ function Aurora:CreateWindow(config)
     })
     Create("UISizeConstraint", {
         Parent  = TabContainer,
-        MinSize = Vector2.new(K.SIDEBAR_MIN, 0),
-        MaxSize = Vector2.new(K.SIDEBAR_MAX, math.huge),
+        MinSize = Vector2.new(L.SIDEBAR_MIN, 0),
+        MaxSize = Vector2.new(L.SIDEBAR_MAX, math.huge),
     })
 
-    -- ── Content area ──────────────────────────────────────────────────────
+    -- ── Content area ───────────────────────
+
+    local function ContentX(sidebarW)
+        return L.SIDEBAR_MARGIN + sidebarW + L.SIDEBAR_GAP
+    end
+    local function ContentW(sidebarW)
+        return -(ContentX(sidebarW) + L.CONTENT_MARGIN)
+    end
 
     local ContentContainer = Create("Frame", {
         Name             = "ContentContainer",
         Parent           = MainFrame,
-        Position         = UDim2.new(0, 8 + K.SIDEBAR_MIN + K.SIDEBAR_GAP, 0, 48),
-        Size             = UDim2.new(1, -(8 + K.SIDEBAR_MIN + K.SIDEBAR_GAP + 8), 1, -56),
+        Position         = UDim2.new(0, ContentX(L.SIDEBAR_MIN), 0, L.CONTENT_TOP),
+        Size             = UDim2.new(1, ContentW(L.SIDEBAR_MIN), 1, -(L.CONTENT_TOP + L.SIDEBAR_MARGIN)),
         BackgroundColor3 = Aurora.Config.Theme.Surface,
         BorderSizePixel  = 0,
         ClipsDescendants = true,
     })
     AddCorner(ContentContainer)
 
-    -- Reflow ContentContainer when the auto-sized sidebar changes width
+    -- Reflow ContentContainer whenever the sidebar auto-sizes
     TabContainer:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
-        local w = math.clamp(TabContainer.AbsoluteSize.X, K.SIDEBAR_MIN, K.SIDEBAR_MAX)
-        ContentContainer.Position = UDim2.new(0, 8 + w + K.SIDEBAR_GAP, 0, 48)
-        ContentContainer.Size     = UDim2.new(1, -(8 + w + K.SIDEBAR_GAP + 8), 1, -56)
+        local w = math.clamp(TabContainer.AbsoluteSize.X, L.SIDEBAR_MIN, L.SIDEBAR_MAX)
+        ContentContainer.Position = UDim2.new(0, ContentX(w), 0, L.CONTENT_TOP)
+        ContentContainer.Size     = UDim2.new(1, ContentW(w), 1, -(L.CONTENT_TOP + L.SIDEBAR_MARGIN))
     end)
 
-    -- Subtle bottom fade for sparse tabs
+    -- Subtle bottom fade
     local FadeGradient = Create("Frame", {
         Parent           = ContentContainer,
         Position         = UDim2.new(0, 0, 1, -28),
@@ -624,7 +444,7 @@ function Aurora:CreateWindow(config)
         Rotation = 90,
     })
 
-    -- ── Window object ─────────────────────────────────────────────────────
+    -- ── Window object ──────────────────────
 
     local Window = {
         ScreenGui        = ScreenGui,
@@ -633,13 +453,12 @@ function Aurora:CreateWindow(config)
         ContentContainer = ContentContainer,
         Tabs             = {},
         ActiveTab        = nil,
-        OnTabChanged     = Signal.new(),  -- fires (newTab, oldTab)
-        SaveConfig       = SaveConfig,
-        LoadConfig       = LoadConfig,
+        OnTabChanged     = Signal.new(),
     }
 
-    function Window:SelectTab(index)
-        local tab = self.Tabs[index]
+    -- [API] Accepts Tab object OR numeric index.
+    function Window:SelectTab(indexOrTab)
+        local tab = type(indexOrTab) == "number" and self.Tabs[indexOrTab] or indexOrTab
         if tab and tab.Activate then tab.Activate() end
     end
 
@@ -650,1684 +469,9 @@ function Aurora:CreateWindow(config)
         ScreenGui:Destroy()
     end
 
-    -- ──────────────────────────────────────────────────────────────────────
-    --  Element builder helpers
-    --  Defined once here and shared by every tab created in this window.
-    -- ──────────────────────────────────────────────────────────────────────
-
-    -- Returns a plain background frame used by most simple elements
-    local function BaseFrame(tabContent, height)
-        local f = Create("Frame", {
-            Parent           = tabContent,
-            Size             = UDim2.new(1, 0, 0, height),
-            BackgroundColor3 = Aurora.Config.Theme.Background,
-            BorderSizePixel  = 0,
-        })
-        AddCorner(f, UDim.new(0, 4))
-        return f
-    end
-
-    -- Attaches Destroy / SetVisible / SetEnabled / tooltip / config to every element
-    local function RegisterElement(tab, emptyState, element, frame, cfg)
-        cfg = cfg or {}
-        if #tab.Elements == 0 then
-            emptyState.Visible = false
-        end
-        table.insert(tab.Elements, element)
-        tab.OnElementAdded:Fire(element)
-
-        -- ── Tooltip ───────────────────────────────────────────────────────
-        if cfg.Tooltip and cfg.Tooltip ~= "" then
-            AttachTooltip(frame, cfg.Tooltip)
-        end
-
-        -- ── Config persistence ────────────────────────────────────────────
-        -- If the element has a Key and a GetValue/SetValue, hook it up.
-        if cfg.Key and element.GetValue and element.SetValue then
-            local key = cfg.Key
-
-            -- Load saved value immediately if one exists
-            if configData[key] ~= nil then
-                pcall(element.SetValue, configData[key])
-                saveData[key] = configData[key]
-            elseif element.GetValue then
-                -- Seed saveData with the element's current default
-                saveData[key] = JSON.wrap(element.GetValue())
-            end
-
-            -- Register loader for LoadConfig()
-            elementLoaders[key] = function(val)
-                pcall(element.SetValue, val)
-            end
-
-            -- Wrap OnChanged to auto-save on every change
-            if element.OnChanged then
-                element.OnChanged:Connect(function(val)
-                    saveData[key] = JSON.wrap(val)
-                    PersistSave()
-                end)
-            end
-        end
-
-        element.Destroy = function()
-            frame:Destroy()
-            for i, e in ipairs(tab.Elements) do
-                if e == element then table.remove(tab.Elements, i) break end
-            end
-            if #tab.Elements == 0 then emptyState.Visible = true end
-        end
-
-        element.SetVisible = function(visible)
-            frame.Visible = visible
-        end
-
-        -- Dims + overlays when disabled; restores when re-enabled.
-        element.SetEnabled = function(enabled)
-            local overlay = frame:FindFirstChild("_DisabledOverlay")
-            if enabled then
-                if overlay then overlay:Destroy() end
-                Tween(frame, {BackgroundTransparency = 0}, 0.15)
-                for _, lbl in ipairs(frame:GetDescendants()) do
-                    if lbl:IsA("TextLabel") or lbl:IsA("TextButton") or lbl:IsA("TextBox") then
-                        local stored = lbl:GetAttribute("_origColor")
-                        if stored then
-                            local r, g, b = stored:match("([^,]+),([^,]+),([^,]+)")
-                            lbl.TextColor3 = Color3.new(tonumber(r), tonumber(g), tonumber(b))
-                        end
-                    end
-                end
-            else
-                for _, lbl in ipairs(frame:GetDescendants()) do
-                    if lbl:IsA("TextLabel") or lbl:IsA("TextButton") or lbl:IsA("TextBox") then
-                        if not lbl:GetAttribute("_origColor") then
-                            local c = lbl.TextColor3
-                            lbl:SetAttribute("_origColor",
-                                string.format("%.6f,%.6f,%.6f", c.R, c.G, c.B))
-                        end
-                        Tween(lbl, {TextColor3 = Aurora.Config.Theme.Border}, 0.15)
-                    end
-                end
-                if not overlay then
-                    overlay = Create("TextButton", {
-                        Name                   = "_DisabledOverlay",
-                        Parent                 = frame,
-                        Size                   = UDim2.new(1, 0, 1, 0),
-                        BackgroundColor3       = Aurora.Config.Theme.Background,
-                        BackgroundTransparency = 0.5,
-                        BorderSizePixel        = 0,
-                        ZIndex                 = 99,
-                        Text                   = "",
-                        AutoButtonColor        = false,
-                    })
-                    AddCorner(overlay, UDim.new(0, 4))
-                end
-            end
-        end
-
-        return element
-    end
-
-    -- ── Outside-click helper ──────────────────────────────────────────────
-    -- Returns a connection that calls `callback` when a mouse/touch down
-    -- event fires anywhere outside `targetFrame`.  The connection is also
-    -- stored in windowConnections so it is cleaned up with the window.
-    local function OnClickOutside(targetFrame, callback)
-        local conn = UserInputService.InputBegan:Connect(function(inp)
-            if inp.UserInputType ~= Enum.UserInputType.MouseButton1
-            and inp.UserInputType ~= Enum.UserInputType.Touch then return end
-
-            -- GuiService:GetGuiObjectsAtPosition is executor-safe
-            -- Fall back to AbsolutePosition bounds check
-            local ap  = targetFrame.AbsolutePosition
-            local as  = targetFrame.AbsoluteSize
-            local mp  = inp.Position
-            local inside = mp.X >= ap.X and mp.X <= ap.X + as.X
-                       and mp.Y >= ap.Y and mp.Y <= ap.Y + as.Y
-            if not inside then
-                callback()
-            end
-        end)
-        table.insert(windowConnections, conn)
-        return conn
-    end
-
-    -- ── Tooltip helper ────────────────────────────────────────────────────
-    -- Attaches a hover tooltip to any GuiObject.
-    -- The tooltip floats above the element (flips below if too close to top).
-    -- A 0.5s hover delay prevents it flashing on fast mouse passes.
-    -- FIX: keep tooltipLabel as a plain Lua local — Roblox Instances do not
-    --      allow arbitrary keys to be set on them directly.
-    local tooltipFrame = Create("Frame", {
-        Name                   = "_AuroraTooltip",
-        Parent                 = ScreenGui,
-        Size                   = UDim2.new(0, 10, 0, 26),
-        BackgroundColor3       = Aurora.Config.Theme.Surface,
-        BorderSizePixel        = 0,
-        Visible                = false,
-        ZIndex                 = 200,
-    })
-    AddCorner(tooltipFrame, UDim.new(0, 4))
-    Create("UIStroke", {
-        Parent          = tooltipFrame,
-        Color           = Aurora.Config.Theme.Border,
-        Thickness       = 1,
-        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-    })
-    Create("UIPadding", {
-        Parent        = tooltipFrame,
-        PaddingLeft   = UDim.new(0, 8),
-        PaddingRight  = UDim.new(0, 8),
-        PaddingTop    = UDim.new(0, 4),
-        PaddingBottom = UDim.new(0, 4),
-    })
-    -- Plain Lua local — NOT stored on the Instance
-    local tooltipLabel = Create("TextLabel", {
-        Name                   = "Label",
-        Parent                 = tooltipFrame,
-        Size                   = UDim2.new(1, 0, 1, 0),
-        BackgroundTransparency = 1,
-        Text                   = "",
-        TextColor3             = Aurora.Config.Theme.TextMuted,
-        Font                   = Aurora.Config.Font,
-        TextSize               = 12,
-        TextWrapped            = false,
-        ZIndex                 = 201,
-    })
-
-    -- Moves the shared tooltip frame near the given GuiObject
-    local function PositionTooltip(anchor)
-        local ap = anchor.AbsolutePosition
-        local as = anchor.AbsoluteSize
-        local ts = tooltipFrame.AbsoluteSize
-        local x  = ap.X
-        local y  = ap.Y - ts.Y - 6     -- default: above the element
-        if y < 4 then
-            y = ap.Y + as.Y + 6        -- flip below if too close to top
-        end
-        tooltipFrame.Position = UDim2.new(0, x, 0, y)
-    end
-
-    -- Attach a tooltip string to any GuiObject.
-    -- Called from RegisterElement when cfg.Tooltip is set.
-    local tooltipThread  -- pending show-delay task handle
-    local function AttachTooltip(anchor, text)
-        anchor.MouseEnter:Connect(function()
-            tooltipThread = task.delay(0.5, function()
-                tooltipLabel.Text = text   -- uses the plain Lua local
-                local textSize = game:GetService("TextService"):GetTextSize(
-                    text, 12, Aurora.Config.Font, Vector2.new(400, 100))
-                tooltipFrame.Size                  = UDim2.new(0, textSize.X + 16, 0, textSize.Y + 8)
-                PositionTooltip(anchor)
-                tooltipFrame.Visible               = true
-                tooltipFrame.BackgroundTransparency = 1
-                Tween(tooltipFrame, {BackgroundTransparency = 0}, 0.15)
-            end)
-        end)
-        anchor.MouseLeave:Connect(function()
-            if tooltipThread then
-                task.cancel(tooltipThread)
-                tooltipThread = nil
-            end
-            tooltipFrame.Visible = false
-        end)
-        anchor.InputBegan:Connect(function(inp)
-            if inp.UserInputType == Enum.UserInputType.MouseButton1 then
-                tooltipFrame.Visible = false
-            end
-        end)
-    end
-    --  Each receives (tabContent, cfg) and returns a raw element table.
-    --  Tab:CreateXxx() calls the builder then RegisterElement().
-    -- ─────────────────────────────────────────────────────────────────────
-
-    local Builders = {}
-
-    -- ── Button ────────────────────────────────────────────────────────────
-
-    function Builders.Button(tabContent, cfg)
-        cfg = cfg or {}
-        local frame = BaseFrame(tabContent, K.ROW_H_SM)
-        local btn = Create("TextButton", {
-            Parent                 = frame,
-            Size                   = UDim2.new(1, 0, 1, 0),
-            BackgroundTransparency = 1,
-            Text                   = cfg.Text or "Button",
-            TextColor3             = Aurora.Config.Theme.Text,
-            Font                   = Aurora.Config.FontMedium,
-            TextSize               = 14,
-            AutoButtonColor        = false,
-        })
-        btn.MouseEnter:Connect(function()
-            Tween(frame, {BackgroundColor3 = Color3.fromRGB(35, 35, 45)}, 0.15)
-        end)
-        btn.MouseLeave:Connect(function()
-            Tween(frame, {BackgroundColor3 = Aurora.Config.Theme.Background}, 0.15)
-        end)
-        btn.MouseButton1Down:Connect(function()
-            Tween(frame, {BackgroundColor3 = Aurora.Config.Theme.Primary}, 0.1)
-        end)
-        btn.MouseButton1Up:Connect(function()
-            Tween(frame, {BackgroundColor3 = Color3.fromRGB(35, 35, 45)}, 0.1)
-        end)
-        btn.MouseButton1Click:Connect(cfg.Callback or function() end)
-
-        return {
-            Frame   = frame,
-            SetText = function(t) btn.Text = t end,
-        }, frame
-    end
-
-    -- ── Toggle ────────────────────────────────────────────────────────────
-
-    function Builders.Toggle(tabContent, cfg)
-        cfg = cfg or {}
-        local toggled   = cfg.Default or false
-        local OnChanged = Signal.new()
-        local frame     = BaseFrame(tabContent, K.ROW_H_SM)
-
-        Create("TextLabel", {
-            Parent                 = frame,
-            Position               = UDim2.new(0, 12, 0, 0),
-            Size                   = UDim2.new(1, -60, 1, 0),
-            BackgroundTransparency = 1,
-            Text                   = cfg.Text or "Toggle",
-            TextColor3             = Aurora.Config.Theme.Text,
-            Font                   = Aurora.Config.FontMedium,
-            TextSize               = 14,
-            TextXAlignment         = Enum.TextXAlignment.Left,
-        })
-
-        local Track = Create("Frame", {
-            Parent           = frame,
-            Position         = UDim2.new(1, -46, 0.5, -10),
-            Size             = UDim2.new(0, 36, 0, 20),
-            BackgroundColor3 = toggled and Aurora.Config.Theme.Primary or Aurora.Config.Theme.Border,
-            BorderSizePixel  = 0,
-        })
-        AddCorner(Track, UDim.new(1, 0))
-
-        local Circle = Create("Frame", {
-            Parent           = Track,
-            Position         = toggled and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8),
-            Size             = UDim2.new(0, 16, 0, 16),
-            BackgroundColor3 = Color3.new(1, 1, 1),
-            BorderSizePixel  = 0,
-        })
-        AddCorner(Circle, UDim.new(1, 0))
-
-        local function Refresh(silent)
-            Tween(Track,  {BackgroundColor3 = toggled and Aurora.Config.Theme.Primary or Aurora.Config.Theme.Border}, 0.2)
-            Tween(Circle, {Position = toggled and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)}, 0.2)
-            if not silent then
-                if cfg.Callback then cfg.Callback(toggled) end
-                OnChanged:Fire(toggled)
-            end
-        end
-
-        Create("TextButton", {
-            Parent                 = frame,
-            Size                   = UDim2.new(1, 0, 1, 0),
-            BackgroundTransparency = 1,
-            Text                   = "",
-        }).MouseButton1Click:Connect(function()
-            toggled = not toggled
-            Refresh(false)
-        end)
-
-        return {
-            Frame     = frame,
-            OnChanged = OnChanged,
-            GetValue  = function() return toggled end,
-            SetValue  = function(val)
-                if toggled ~= val then
-                    toggled = val
-                    Refresh(false)
-                end
-            end,
-        }, frame
-    end
-
-    -- ── Slider ────────────────────────────────────────────────────────────
-
-    function Builders.Slider(tabContent, cfg)
-        cfg = cfg or {}
-        local min       = cfg.Min       or 0
-        local max       = cfg.Max       or 100
-        local increment = cfg.Increment or 1
-        local current   = math.clamp(cfg.Default or min, min, max)
-        local OnChanged = Signal.new()
-        local frame     = BaseFrame(tabContent, K.ROW_H_MD)
-
-        Create("TextLabel", {
-            Parent                 = frame,
-            Position               = UDim2.new(0, 12, 0, 8),
-            Size                   = UDim2.new(1, -60, 0, 16),
-            BackgroundTransparency = 1,
-            Text                   = cfg.Text or "Slider",
-            TextColor3             = Aurora.Config.Theme.Text,
-            Font                   = Aurora.Config.FontMedium,
-            TextSize               = 14,
-            TextXAlignment         = Enum.TextXAlignment.Left,
-        })
-
-        local ValueLabel = Create("TextLabel", {
-            Parent                 = frame,
-            Position               = UDim2.new(1, -52, 0, 8),
-            Size                   = UDim2.new(0, 42, 0, 16),
-            BackgroundTransparency = 1,
-            Text                   = tostring(current),
-            TextColor3             = Aurora.Config.Theme.Primary,
-            Font                   = Aurora.Config.FontBold,
-            TextSize               = 14,
-            TextXAlignment         = Enum.TextXAlignment.Right,
-        })
-
-        local Bar = Create("Frame", {
-            Parent           = frame,
-            Position         = UDim2.new(0, 12, 0, 32),
-            Size             = UDim2.new(1, -24, 0, 4),
-            BackgroundColor3 = Aurora.Config.Theme.Border,
-            BorderSizePixel  = 0,
-        })
-        AddCorner(Bar, UDim.new(1, 0))
-
-        local Fill = Create("Frame", {
-            Parent           = Bar,
-            Size             = UDim2.new((current - min) / (max - min), 0, 1, 0),
-            BackgroundColor3 = Aurora.Config.Theme.Primary,
-            BorderSizePixel  = 0,
-        })
-        AddCorner(Fill, UDim.new(1, 0))
-
-        local Knob = Create("Frame", {
-            Parent           = Bar,
-            Position         = UDim2.new((current - min) / (max - min), -6, 0.5, -6),
-            Size             = UDim2.new(0, 12, 0, 12),
-            BackgroundColor3 = Color3.new(1, 1, 1),
-            BorderSizePixel  = 0,
-        })
-        AddCorner(Knob, UDim.new(1, 0))
-
-        local dragging = false
-
-        -- Direct property assignment during drag (no tween) for responsiveness
-        local function Apply(inputX)
-            local pct   = math.clamp((inputX - Bar.AbsolutePosition.X) / Bar.AbsoluteSize.X, 0, 1)
-            local raw   = min + (max - min) * pct
-            local value = math.clamp(math.floor(raw / increment + 0.5) * increment, min, max)
-            if value == current then return end
-            current             = value
-            local f             = (value - min) / (max - min)
-            Fill.Size           = UDim2.new(f, 0, 1, 0)
-            Knob.Position       = UDim2.new(f, -6, 0.5, -6)
-            ValueLabel.Text     = tostring(value)
-            if cfg.Callback then cfg.Callback(value) end
-            OnChanged:Fire(value)
-        end
-
-        -- FIX: all four connections stored so none are leaked on Destroy
-        local c1 = Knob.InputBegan:Connect(function(inp)
-            if inp.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end
-        end)
-        local c2 = Bar.InputBegan:Connect(function(inp)
-            if inp.UserInputType == Enum.UserInputType.MouseButton1 then
-                dragging = true
-                Apply(inp.Position.X)
-            end
-        end)
-        local c3 = UserInputService.InputChanged:Connect(function(inp)
-            if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
-                Apply(inp.Position.X)
-            end
-        end)
-        local c4 = UserInputService.InputEnded:Connect(function(inp)
-            if inp.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
-        end)
-        -- c1 & c2 are on child instances; disconnect them together with the element
-        -- c3 & c4 are global listeners that must be cleaned up at window level
-        table.insert(windowConnections, c1)
-        table.insert(windowConnections, c2)
-        table.insert(windowConnections, c3)
-        table.insert(windowConnections, c4)
-
-        return {
-            Frame     = frame,
-            OnChanged = OnChanged,
-            GetValue  = function() return current end,
-            SetValue  = function(val)
-                val             = math.clamp(val, min, max)
-                current         = val
-                local f         = (val - min) / (max - min)
-                Fill.Size       = UDim2.new(f, 0, 1, 0)
-                Knob.Position   = UDim2.new(f, -6, 0.5, -6)
-                ValueLabel.Text = tostring(val)
-            end,
-        }, frame
-    end
-
-    -- ── Dropdown ──────────────────────────────────────────────────────────
-
-    function Builders.Dropdown(tabContent, cfg)
-        cfg = cfg or {}
-        local options   = cfg.Options or {}
-        local selected  = cfg.Default or "Select..."
-        local expanded  = false
-        local OnChanged = Signal.new()
-
-        local DropdownFrame = Create("Frame", {
-            Parent           = tabContent,
-            Size             = UDim2.new(1, 0, 0, K.DROPDOWN_H),
-            BackgroundColor3 = Aurora.Config.Theme.Background,
-            BorderSizePixel  = 0,
-            ClipsDescendants = true,
-        })
-        AddCorner(DropdownFrame, UDim.new(0, 4))
-
-        local Label = Create("TextLabel", {
-            Parent                 = DropdownFrame,
-            Position               = UDim2.new(0, 12, 0, 0),
-            Size                   = UDim2.new(1, -38, 0, K.DROPDOWN_H),
-            BackgroundTransparency = 1,
-            Text                   = (cfg.Text or "Dropdown") .. ": " .. selected,
-            TextColor3             = Aurora.Config.Theme.Text,
-            Font                   = Aurora.Config.FontMedium,
-            TextSize               = 14,
-            TextXAlignment         = Enum.TextXAlignment.Left,
-            TextTruncate           = Enum.TextTruncate.AtEnd,
-        })
-
-        local Arrow = Create("TextLabel", {
-            Parent                 = DropdownFrame,
-            Position               = UDim2.new(1, -28, 0, 0),
-            Size                   = UDim2.new(0, 20, 0, K.DROPDOWN_H),
-            BackgroundTransparency = 1,
-            Text                   = "▼",
-            TextColor3             = Aurora.Config.Theme.TextMuted,
-            Font                   = Aurora.Config.FontBold,
-            TextSize               = 11,
-        })
-
-        local OptionsFrame = Create("Frame", {
-            Parent           = DropdownFrame,
-            Position         = UDim2.new(0, 0, 0, K.DROPDOWN_H),
-            Size             = UDim2.new(1, 0, 0, #options * K.DROPDOWN_ROW_H),
-            BackgroundColor3 = Aurora.Config.Theme.Surface,
-            BorderSizePixel  = 0,
-        })
-        Create("UIListLayout", {Parent = OptionsFrame, SortOrder = Enum.SortOrder.LayoutOrder})
-
-        local function Collapse()
-            if not expanded then return end
-            expanded = false
-            Tween(DropdownFrame, {Size = UDim2.new(1, 0, 0, K.DROPDOWN_H)}, 0.2)
-            Tween(Arrow, {Rotation = 0}, 0.2)
-        end
-
-        -- FIX: close on outside click
-        OnClickOutside(DropdownFrame, Collapse)
-
-        for i, option in ipairs(options) do
-            local ob = Create("TextButton", {
-                Parent           = OptionsFrame,
-                Size             = UDim2.new(1, 0, 0, K.DROPDOWN_ROW_H),
-                BackgroundColor3 = Aurora.Config.Theme.Surface,
-                Text             = option,
-                TextColor3       = Aurora.Config.Theme.TextMuted,
-                Font             = Aurora.Config.FontMedium,
-                TextSize         = 13,
-                LayoutOrder      = i,
-                AutoButtonColor  = false,
-            })
-            ob.MouseEnter:Connect(function()
-                Tween(ob, {BackgroundColor3 = Aurora.Config.Theme.Background, TextColor3 = Aurora.Config.Theme.Text}, 0.15)
-            end)
-            ob.MouseLeave:Connect(function()
-                Tween(ob, {BackgroundColor3 = Aurora.Config.Theme.Surface, TextColor3 = Aurora.Config.Theme.TextMuted}, 0.15)
-            end)
-            ob.MouseButton1Click:Connect(function()
-                selected   = option
-                Label.Text = (cfg.Text or "Dropdown") .. ": " .. option
-                if cfg.Callback then cfg.Callback(option) end
-                OnChanged:Fire(option)
-                Collapse()
-            end)
-        end
-
-        Create("TextButton", {
-            Parent                 = DropdownFrame,
-            Size                   = UDim2.new(1, 0, 0, K.DROPDOWN_H),
-            BackgroundTransparency = 1,
-            Text                   = "",
-        }).MouseButton1Click:Connect(function()
-            expanded = not expanded
-            Tween(DropdownFrame, {Size = UDim2.new(1, 0, 0, expanded and K.DROPDOWN_H + #options * K.DROPDOWN_ROW_H or K.DROPDOWN_H)}, 0.2)
-            Tween(Arrow, {Rotation = expanded and 180 or 0}, 0.2)
-        end)
-
-        return {
-            Frame     = DropdownFrame,
-            OnChanged = OnChanged,
-            GetValue  = function() return selected end,
-            SetValue  = function(val)
-                if table.find(options, val) then
-                    selected   = val
-                    Label.Text = (cfg.Text or "Dropdown") .. ": " .. val
-                end
-            end,
-        }, DropdownFrame
-    end
-
-    -- ── SearchDropdown ────────────────────────────────────────────────────
-
-    function Builders.SearchDropdown(tabContent, cfg)
-        cfg = cfg or {}
-        local options     = cfg.Options    or {}
-        local selected    = cfg.Default    or "Select..."
-        local expanded    = false
-        local OnChanged   = Signal.new()
-        local labelText   = cfg.Text       or "Search"
-        local MAX_VISIBLE = cfg.MaxVisible or 6
-
-        local DropFrame = Create("Frame", {
-            Parent           = tabContent,
-            Size             = UDim2.new(1, 0, 0, K.DROPDOWN_H),
-            BackgroundColor3 = Aurora.Config.Theme.Background,
-            BorderSizePixel  = 0,
-            ClipsDescendants = true,
-        })
-        AddCorner(DropFrame, UDim.new(0, 4))
-
-        local HeaderLabel = Create("TextLabel", {
-            Parent                 = DropFrame,
-            Position               = UDim2.new(0, 12, 0, 0),
-            Size                   = UDim2.new(1, -38, 0, K.DROPDOWN_H),
-            BackgroundTransparency = 1,
-            Text                   = labelText .. ": " .. selected,
-            TextColor3             = Aurora.Config.Theme.Text,
-            Font                   = Aurora.Config.FontMedium,
-            TextSize               = 14,
-            TextXAlignment         = Enum.TextXAlignment.Left,
-            TextTruncate           = Enum.TextTruncate.AtEnd,
-        })
-
-        local Arrow = Create("TextLabel", {
-            Parent                 = DropFrame,
-            Position               = UDim2.new(1, -28, 0, 0),
-            Size                   = UDim2.new(0, 20, 0, K.DROPDOWN_H),
-            BackgroundTransparency = 1,
-            Text                   = "▼",
-            TextColor3             = Aurora.Config.Theme.TextMuted,
-            Font                   = Aurora.Config.FontBold,
-            TextSize               = 11,
-        })
-
-        local SearchBox = Create("TextBox", {
-            Parent             = DropFrame,
-            Position           = UDim2.new(0, 6, 0, K.SEARCH_BOX_TOP),
-            Size               = UDim2.new(1, -12, 0, K.SEARCH_BOX_H),
-            BackgroundColor3   = Aurora.Config.Theme.Surface,
-            BorderSizePixel    = 0,
-            Text               = "",
-            PlaceholderText    = "Search...",
-            PlaceholderColor3  = Aurora.Config.Theme.TextMuted,
-            TextColor3         = Aurora.Config.Theme.Text,
-            Font               = Aurora.Config.Font,
-            TextSize           = 12,
-            ClearTextOnFocus   = true,
-        })
-        AddCorner(SearchBox, UDim.new(0, 4))
-        Create("UIPadding", {Parent = SearchBox, PaddingLeft = UDim.new(0, 8)})
-
-        local ListFrame = Create("ScrollingFrame", {
-            Parent               = DropFrame,
-            Position             = UDim2.new(0, 0, 0, K.LIST_TOP),
-            Size                 = UDim2.new(1, 0, 0, math.min(#options, MAX_VISIBLE) * K.DROPDOWN_ROW_H),
-            BackgroundColor3     = Aurora.Config.Theme.Surface,
-            BorderSizePixel      = 0,
-            ScrollBarThickness   = 2,
-            ScrollBarImageColor3 = Aurora.Config.Theme.Border,
-            AutomaticCanvasSize  = Enum.AutomaticSize.Y,
-            CanvasSize           = UDim2.new(0, 0, 0, 0),
-            ClipsDescendants     = true,
-        })
-        Create("UIListLayout", {Parent = ListFrame, SortOrder = Enum.SortOrder.LayoutOrder})
-
-        local optionBtns = {}
-        for i, option in ipairs(options) do
-            local ob = Create("TextButton", {
-                Parent           = ListFrame,
-                Size             = UDim2.new(1, 0, 0, K.DROPDOWN_ROW_H),
-                BackgroundColor3 = Aurora.Config.Theme.Surface,
-                Text             = option,
-                TextColor3       = Aurora.Config.Theme.TextMuted,
-                Font             = Aurora.Config.FontMedium,
-                TextSize         = 13,
-                LayoutOrder      = i,
-                AutoButtonColor  = false,
-            })
-            ob.MouseEnter:Connect(function()
-                Tween(ob, {BackgroundColor3 = Aurora.Config.Theme.Background, TextColor3 = Aurora.Config.Theme.Text}, 0.15)
-            end)
-            ob.MouseLeave:Connect(function()
-                Tween(ob, {BackgroundColor3 = Aurora.Config.Theme.Surface, TextColor3 = Aurora.Config.Theme.TextMuted}, 0.15)
-            end)
-            ob.MouseButton1Click:Connect(function()
-                selected         = option
-                HeaderLabel.Text = labelText .. ": " .. option
-                SearchBox.Text   = ""
-                if cfg.Callback then cfg.Callback(option) end
-                OnChanged:Fire(option)
-                for _, btn in ipairs(optionBtns) do btn.Visible = true end
-                expanded = false
-                Tween(DropFrame, {Size = UDim2.new(1, 0, 0, K.DROPDOWN_H)}, 0.2)
-                Tween(Arrow, {Rotation = 0}, 0.2)
-            end)
-            optionBtns[i] = ob
-        end
-
-        SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
-            local query  = SearchBox.Text:lower()
-            local visible = 0
-            for i, opt in ipairs(options) do
-                local show = query == "" or opt:lower():find(query, 1, true) ~= nil
-                optionBtns[i].Visible = show
-                if show then visible = visible + 1 end
-            end
-            local newH = math.min(visible, MAX_VISIBLE) * K.DROPDOWN_ROW_H
-            ListFrame.Size = UDim2.new(1, 0, 0, newH)
-            DropFrame.Size = UDim2.new(1, 0, 0, K.LIST_TOP + newH)
-        end)
-
-        local function TotalExpandedH()
-            return K.LIST_TOP + math.min(#options, MAX_VISIBLE) * K.DROPDOWN_ROW_H
-        end
-
-        local function Collapse()
-            if not expanded then return end
-            expanded = false
-            Tween(DropFrame, {Size = UDim2.new(1, 0, 0, K.DROPDOWN_H)}, 0.2)
-            Tween(Arrow, {Rotation = 0}, 0.2)
-        end
-
-        OnClickOutside(DropFrame, Collapse)
-
-        Create("TextButton", {
-            Parent                 = DropFrame,
-            Size                   = UDim2.new(1, 0, 0, K.DROPDOWN_H),
-            BackgroundTransparency = 1,
-            Text                   = "",
-        }).MouseButton1Click:Connect(function()
-            expanded = not expanded
-            if expanded then
-                Tween(DropFrame, {Size = UDim2.new(1, 0, 0, TotalExpandedH())}, 0.2)
-                Tween(Arrow, {Rotation = 180}, 0.2)
-                SearchBox.Text = ""
-                for _, btn in ipairs(optionBtns) do btn.Visible = true end
-                ListFrame.Size = UDim2.new(1, 0, 0, math.min(#options, MAX_VISIBLE) * K.DROPDOWN_ROW_H)
-            else
-                Collapse()
-            end
-        end)
-
-        return {
-            Frame     = DropFrame,
-            OnChanged = OnChanged,
-            GetValue  = function() return selected end,
-            SetValue  = function(val)
-                if table.find(options, val) then
-                    selected         = val
-                    HeaderLabel.Text = labelText .. ": " .. val
-                end
-            end,
-        }, DropFrame
-    end
-
-    -- ── MultiSelect ───────────────────────────────────────────────────────
-
-    function Builders.MultiSelect(tabContent, cfg)
-        cfg = cfg or {}
-        local options   = cfg.Options or {}
-        local selected  = {}
-        local expanded  = false
-        local OnChanged = Signal.new()
-        local labelText = cfg.Text or "Select"
-
-        for _, opt in ipairs(cfg.Default or {}) do
-            selected[opt] = true
-        end
-
-        local function SelectedList()
-            local t = {}
-            for _, opt in ipairs(options) do
-                if selected[opt] then t[#t + 1] = opt end
-            end
-            return t
-        end
-
-        local function HeaderText()
-            local list = SelectedList()
-            if #list == 0     then return labelText .. ": None"
-            elseif #list == 1 then return labelText .. ": " .. list[1]
-            else                   return labelText .. ": " .. #list .. " selected" end
-        end
-
-        local MultiFrame = Create("Frame", {
-            Parent           = tabContent,
-            Size             = UDim2.new(1, 0, 0, K.DROPDOWN_H),
-            BackgroundColor3 = Aurora.Config.Theme.Background,
-            BorderSizePixel  = 0,
-            ClipsDescendants = true,
-        })
-        AddCorner(MultiFrame, UDim.new(0, 4))
-
-        local Label = Create("TextLabel", {
-            Parent                 = MultiFrame,
-            Position               = UDim2.new(0, 12, 0, 0),
-            Size                   = UDim2.new(1, -38, 0, K.DROPDOWN_H),
-            BackgroundTransparency = 1,
-            Text                   = HeaderText(),
-            TextColor3             = Aurora.Config.Theme.Text,
-            Font                   = Aurora.Config.FontMedium,
-            TextSize               = 14,
-            TextXAlignment         = Enum.TextXAlignment.Left,
-            TextTruncate           = Enum.TextTruncate.AtEnd,
-        })
-
-        local Arrow = Create("TextLabel", {
-            Parent                 = MultiFrame,
-            Position               = UDim2.new(1, -28, 0, 0),
-            Size                   = UDim2.new(0, 20, 0, K.DROPDOWN_H),
-            BackgroundTransparency = 1,
-            Text                   = "▼",
-            TextColor3             = Aurora.Config.Theme.TextMuted,
-            Font                   = Aurora.Config.FontBold,
-            TextSize               = 11,
-        })
-
-        local OptionsFrame = Create("Frame", {
-            Parent           = MultiFrame,
-            Position         = UDim2.new(0, 0, 0, K.DROPDOWN_H),
-            Size             = UDim2.new(1, 0, 0, #options * K.DROPDOWN_ROW_H),
-            BackgroundColor3 = Aurora.Config.Theme.Surface,
-            BorderSizePixel  = 0,
-        })
-        Create("UIListLayout", {Parent = OptionsFrame, SortOrder = Enum.SortOrder.LayoutOrder})
-
-        -- FIX: store per-row UI refs directly instead of querying by child name
-        local rowRefs = {}   -- rowRefs[i] = {box, tick, lbl}
-
-        for i, option in ipairs(options) do
-            local row = Create("Frame", {
-                Parent           = OptionsFrame,
-                Size             = UDim2.new(1, 0, 0, K.DROPDOWN_ROW_H),
-                BackgroundColor3 = Aurora.Config.Theme.Surface,
-                BorderSizePixel  = 0,
-                LayoutOrder      = i,
-            })
-
-            local Box = Create("Frame", {
-                Parent           = row,
-                Position         = UDim2.new(0, 8, 0.5, -8),
-                Size             = UDim2.new(0, 16, 0, 16),
-                BackgroundColor3 = selected[option] and Aurora.Config.Theme.Primary or Aurora.Config.Theme.Border,
-                BorderSizePixel  = 0,
-            })
-            AddCorner(Box, UDim.new(0, 3))
-
-            local Tick = Create("TextLabel", {
-                Parent                 = Box,
-                Size                   = UDim2.new(1, 0, 1, 0),
-                BackgroundTransparency = 1,
-                Text                   = selected[option] and "✓" or "",
-                TextColor3             = Aurora.Config.Theme.Text,
-                Font                   = Aurora.Config.FontBold,
-                TextSize               = 11,
-            })
-
-            local OptionLbl = Create("TextLabel", {
-                Parent                 = row,
-                Position               = UDim2.new(0, 32, 0, 0),
-                Size                   = UDim2.new(1, -40, 1, 0),
-                BackgroundTransparency = 1,
-                Text                   = option,
-                TextColor3             = selected[option] and Aurora.Config.Theme.Text or Aurora.Config.Theme.TextMuted,
-                Font                   = Aurora.Config.FontMedium,
-                TextSize               = 13,
-                TextXAlignment         = Enum.TextXAlignment.Left,
-            })
-
-            rowRefs[i] = {box = Box, tick = Tick, lbl = OptionLbl}
-
-            local RowBtn = Create("TextButton", {
-                Parent                 = row,
-                Size                   = UDim2.new(1, 0, 1, 0),
-                BackgroundTransparency = 1,
-                Text                   = "",
-            })
-            RowBtn.MouseEnter:Connect(function()
-                Tween(row, {BackgroundColor3 = Aurora.Config.Theme.Background}, 0.15)
-            end)
-            RowBtn.MouseLeave:Connect(function()
-                Tween(row, {BackgroundColor3 = Aurora.Config.Theme.Surface}, 0.15)
-            end)
-            RowBtn.MouseButton1Click:Connect(function()
-                selected[option] = not selected[option]
-                local on = selected[option]
-                Tween(Box,        {BackgroundColor3 = on and Aurora.Config.Theme.Primary or Aurora.Config.Theme.Border}, 0.15)
-                Tween(OptionLbl,  {TextColor3 = on and Aurora.Config.Theme.Text or Aurora.Config.Theme.TextMuted}, 0.15)
-                Tick.Text  = on and "✓" or ""
-                Label.Text = HeaderText()
-                local vals = SelectedList()
-                if cfg.Callback then cfg.Callback(vals) end
-                OnChanged:Fire(vals)
-            end)
-        end
-
-        OnClickOutside(MultiFrame, function()
-            if expanded then
-                expanded = false
-                Tween(MultiFrame, {Size = UDim2.new(1, 0, 0, K.DROPDOWN_H)}, 0.2)
-                Tween(Arrow, {Rotation = 0}, 0.2)
-            end
-        end)
-
-        Create("TextButton", {
-            Parent                 = MultiFrame,
-            Size                   = UDim2.new(1, 0, 0, K.DROPDOWN_H),
-            BackgroundTransparency = 1,
-            Text                   = "",
-        }).MouseButton1Click:Connect(function()
-            expanded = not expanded
-            Tween(MultiFrame, {Size = UDim2.new(1, 0, 0, expanded and K.DROPDOWN_H + #options * K.DROPDOWN_ROW_H or K.DROPDOWN_H)}, 0.2)
-            Tween(Arrow, {Rotation = expanded and 180 or 0}, 0.2)
-        end)
-
-        return {
-            Frame     = MultiFrame,
-            OnChanged = OnChanged,
-            GetValue  = function() return SelectedList() end,
-            SetValue  = function(vals)
-                selected = {}
-                for _, v in ipairs(vals) do selected[v] = true end
-                Label.Text = HeaderText()
-                -- FIX: use cached refs instead of GetChildren + FindFirstChild
-                for i, option in ipairs(options) do
-                    local refs = rowRefs[i]
-                    local on   = selected[option] == true
-                    refs.box.BackgroundColor3 = on and Aurora.Config.Theme.Primary or Aurora.Config.Theme.Border
-                    refs.tick.Text            = on and "✓" or ""
-                    refs.lbl.TextColor3       = on and Aurora.Config.Theme.Text or Aurora.Config.Theme.TextMuted
-                end
-            end,
-            IsSelected = function(opt) return selected[opt] == true end,
-        }, MultiFrame
-    end
-
-    -- ── Input ─────────────────────────────────────────────────────────────
-
-    function Builders.Input(tabContent, cfg)
-        cfg = cfg or {}
-        local OnChanged = Signal.new()
-        local frame     = BaseFrame(tabContent, K.ROW_H_LG)
-
-        Create("TextLabel", {
-            Parent                 = frame,
-            Position               = UDim2.new(0, 12, 0, 6),
-            Size                   = UDim2.new(1, -24, 0, 16),
-            BackgroundTransparency = 1,
-            Text                   = cfg.Text or "Input",
-            TextColor3             = Aurora.Config.Theme.TextMuted,
-            Font                   = Aurora.Config.FontMedium,
-            TextSize               = 12,
-            TextXAlignment         = Enum.TextXAlignment.Left,
-        })
-
-        local InputBox = Create("TextBox", {
-            Parent             = frame,
-            Position           = UDim2.new(0, 10, 0, 26),
-            Size               = UDim2.new(1, -20, 0, 22),
-            BackgroundColor3   = Aurora.Config.Theme.Surface,
-            BorderSizePixel    = 0,
-            Text               = "",
-            PlaceholderText    = cfg.Placeholder or "Type here...",
-            PlaceholderColor3  = Aurora.Config.Theme.TextMuted,
-            TextColor3         = Aurora.Config.Theme.Text,
-            Font               = Aurora.Config.Font,
-            TextSize           = 13,
-            ClearTextOnFocus   = false,
-            TextXAlignment     = Enum.TextXAlignment.Left,
-        })
-        AddCorner(InputBox, UDim.new(0, 4))
-        Create("UIPadding", {Parent = InputBox, PaddingLeft = UDim.new(0, 8)})
-
-        InputBox.Focused:Connect(function()
-            Tween(InputBox, {BackgroundColor3 = Color3.fromRGB(32, 32, 42)}, 0.15)
-        end)
-        -- FIX: commit on blur as well as Enter so clicking away applies the value
-        InputBox.FocusLost:Connect(function(enter)
-            Tween(InputBox, {BackgroundColor3 = Aurora.Config.Theme.Surface}, 0.15)
-            if cfg.Callback then cfg.Callback(InputBox.Text) end
-            OnChanged:Fire(InputBox.Text)
-            -- _ `enter` kept as parameter in case caller needs to distinguish
-        end)
-
-        return {
-            Frame     = frame,
-            OnChanged = OnChanged,
-            GetValue  = function() return InputBox.Text end,
-            SetValue  = function(val) InputBox.Text = val end,
-        }, frame
-    end
-
-    -- ── NumberInput ───────────────────────────────────────────────────────
-
-    function Builders.NumberInput(tabContent, cfg)
-        cfg = cfg or {}
-        local min     = cfg.Min     or -math.huge
-        local max     = cfg.Max     or math.huge
-        local step    = cfg.Step    or 1
-        local current = math.clamp(cfg.Default or 0, min, max)
-        local OnChanged = Signal.new()
-        local frame     = BaseFrame(tabContent, K.ROW_H_LG)
-
-        Create("TextLabel", {
-            Parent                 = frame,
-            Position               = UDim2.new(0, 12, 0, 6),
-            Size                   = UDim2.new(1, -24, 0, 16),
-            BackgroundTransparency = 1,
-            Text                   = cfg.Text or "Number",
-            TextColor3             = Aurora.Config.Theme.TextMuted,
-            Font                   = Aurora.Config.FontMedium,
-            TextSize               = 12,
-            TextXAlignment         = Enum.TextXAlignment.Left,
-        })
-
-        local Row = Create("Frame", {
-            Parent                 = frame,
-            Position               = UDim2.new(0, 10, 0, 26),
-            Size                   = UDim2.new(1, -20, 0, 22),
-            BackgroundTransparency = 1,
-            BorderSizePixel        = 0,
-        })
-
-        local function MakeStepBtn(xAlign, symbol)
-            local btn = Create("TextButton", {
-                Parent           = Row,
-                AnchorPoint      = Vector2.new(xAlign, 0),
-                Position         = UDim2.new(xAlign, 0, 0, 0),
-                Size             = UDim2.new(0, 26, 1, 0),
-                BackgroundColor3 = Aurora.Config.Theme.Surface,
-                Text             = symbol,
-                TextColor3       = Aurora.Config.Theme.Primary,
-                Font             = Aurora.Config.FontBold,
-                TextSize         = 16,
-                AutoButtonColor  = false,
-                BorderSizePixel  = 0,
-            })
-            AddCorner(btn, UDim.new(0, 4))
-            btn.MouseEnter:Connect(function()
-                Tween(btn, {BackgroundColor3 = Aurora.Config.Theme.Primary, TextColor3 = Aurora.Config.Theme.Text}, 0.15)
-            end)
-            btn.MouseLeave:Connect(function()
-                Tween(btn, {BackgroundColor3 = Aurora.Config.Theme.Surface, TextColor3 = Aurora.Config.Theme.Primary}, 0.15)
-            end)
-            return btn
-        end
-
-        local MinusBtn = MakeStepBtn(0, "−")
-        local PlusBtn  = MakeStepBtn(1, "+")
-
-        local NumBox = Create("TextBox", {
-            Parent             = Row,
-            Position           = UDim2.new(0, 30, 0, 0),
-            Size               = UDim2.new(1, -60, 1, 0),
-            BackgroundColor3   = Aurora.Config.Theme.Surface,
-            BorderSizePixel    = 0,
-            Text               = tostring(current),
-            TextColor3         = Aurora.Config.Theme.Text,
-            Font               = Aurora.Config.FontBold,
-            TextSize           = 13,
-            ClearTextOnFocus   = false,
-            TextXAlignment     = Enum.TextXAlignment.Center,
-        })
-        AddCorner(NumBox, UDim.new(0, 4))
-
-        local function Commit(val)
-            val = math.clamp(math.floor(val / step + 0.5) * step, min, max)
-            if val == current then
-                NumBox.Text = tostring(current)
-                return
-            end
-            current     = val
-            NumBox.Text = tostring(val)
-            if cfg.Callback then cfg.Callback(val) end
-            OnChanged:Fire(val)
-        end
-
-        MinusBtn.MouseButton1Click:Connect(function() Commit(current - step) end)
-        PlusBtn.MouseButton1Click:Connect(function()  Commit(current + step) end)
-        NumBox.FocusLost:Connect(function()
-            local n = tonumber(NumBox.Text)
-            if n then Commit(n) else NumBox.Text = tostring(current) end
-        end)
-
-        return {
-            Frame     = frame,
-            OnChanged = OnChanged,
-            GetValue  = function() return current end,
-            SetValue  = function(val) Commit(val) end,
-        }, frame
-    end
-
-    -- ── Keybind ───────────────────────────────────────────────────────────
-
-    function Builders.Keybind(tabContent, cfg)
-        cfg = cfg or {}
-        local current   = cfg.Default or Enum.KeyCode.Unknown
-        local listening = false
-        local OnChanged = Signal.new()
-        local frame     = BaseFrame(tabContent, K.ROW_H_SM)
-
-        Create("TextLabel", {
-            Parent                 = frame,
-            Position               = UDim2.new(0, 12, 0, 0),
-            Size                   = UDim2.new(1, -110, 1, 0),
-            BackgroundTransparency = 1,
-            Text                   = cfg.Text or "Keybind",
-            TextColor3             = Aurora.Config.Theme.Text,
-            Font                   = Aurora.Config.FontMedium,
-            TextSize               = 14,
-            TextXAlignment         = Enum.TextXAlignment.Left,
-        })
-
-        local KeyBtn = Create("TextButton", {
-            Parent           = frame,
-            Position         = UDim2.new(1, -98, 0.5, -12),
-            Size             = UDim2.new(0, 88, 0, 24),
-            BackgroundColor3 = Aurora.Config.Theme.Surface,
-            Text             = current == Enum.KeyCode.Unknown and "None" or current.Name,
-            TextColor3       = Aurora.Config.Theme.Primary,
-            Font             = Aurora.Config.FontBold,
-            TextSize         = 12,
-            AutoButtonColor  = false,
-            BorderSizePixel  = 0,
-        })
-        AddCorner(KeyBtn, UDim.new(0, 4))
-
-        local keyCon    -- active keyboard capture connection
-        local cancelCon -- active outside-click cancel connection
-
-        local function StopListening()
-            if not listening then return end
-            listening               = false
-            KeyBtn.BackgroundColor3 = Aurora.Config.Theme.Surface
-            KeyBtn.TextColor3       = Aurora.Config.Theme.Primary
-            KeyBtn.Text             = current == Enum.KeyCode.Unknown and "None" or current.Name
-            if keyCon    then keyCon:Disconnect()    keyCon    = nil end
-            if cancelCon then cancelCon:Disconnect() cancelCon = nil end
-        end
-
-        local function StartListening()
-            listening               = true
-            KeyBtn.Text             = "..."
-            KeyBtn.BackgroundColor3 = Aurora.Config.Theme.Primary
-            KeyBtn.TextColor3       = Aurora.Config.Theme.Text
-
-            keyCon = UserInputService.InputBegan:Connect(function(inp, processed)
-                if processed then return end
-                if inp.UserInputType == Enum.UserInputType.Keyboard then
-                    current = inp.KeyCode
-                    if cfg.Callback then cfg.Callback(current) end
-                    OnChanged:Fire(current)
-                    StopListening()
-                end
-            end)
-
-            -- FIX: use task.defer so this cancel connection doesn't fire on
-            -- the same frame as the button click that called StartListening()
-            task.defer(function()
-                if not listening then return end
-                cancelCon = UserInputService.InputBegan:Connect(function(inp)
-                    if inp.UserInputType == Enum.UserInputType.MouseButton1 then
-                        StopListening()
-                    end
-                end)
-                table.insert(windowConnections, cancelCon)
-            end)
-        end
-
-        KeyBtn.MouseButton1Click:Connect(function()
-            if listening then StopListening() else StartListening() end
-        end)
-
-        return {
-            Frame     = frame,
-            OnChanged = OnChanged,
-            GetValue  = function() return current end,
-            SetValue  = function(key)
-                current     = key
-                KeyBtn.Text = key == Enum.KeyCode.Unknown and "None" or key.Name
-            end,
-        }, frame
-    end
-
-    -- ── ColorPicker ───────────────────────────────────────────────────────
-
-    function Builders.ColorPicker(tabContent, cfg)
-        cfg = cfg or {}
-        local color     = cfg.Default or Color3.fromRGB(255, 255, 255)
-        local expanded  = false
-        local OnChanged = Signal.new()
-        local h, s, v   = Color3.toHSV(color)
-
-        local PickerFrame = Create("Frame", {
-            Parent           = tabContent,
-            Size             = UDim2.new(1, 0, 0, K.DROPDOWN_H),
-            BackgroundColor3 = Aurora.Config.Theme.Background,
-            BorderSizePixel  = 0,
-            ClipsDescendants = true,
-        })
-        AddCorner(PickerFrame, UDim.new(0, 4))
-
-        Create("TextLabel", {
-            Parent                 = PickerFrame,
-            Position               = UDim2.new(0, 12, 0, 0),
-            Size                   = UDim2.new(1, -56, 0, K.DROPDOWN_H),
-            BackgroundTransparency = 1,
-            Text                   = cfg.Text or "Color",
-            TextColor3             = Aurora.Config.Theme.Text,
-            Font                   = Aurora.Config.FontMedium,
-            TextSize               = 14,
-            TextXAlignment         = Enum.TextXAlignment.Left,
-        })
-
-        local Preview = Create("Frame", {
-            Parent           = PickerFrame,
-            Position         = UDim2.new(1, -42, 0.5, -10),
-            Size             = UDim2.new(0, 28, 0, 20),
-            BackgroundColor3 = color,
-            BorderSizePixel  = 0,
-        })
-        AddCorner(Preview, UDim.new(0, 4))
-
-        Create("TextButton", {
-            Parent                 = PickerFrame,
-            Size                   = UDim2.new(1, 0, 0, K.DROPDOWN_H),
-            BackgroundTransparency = 1,
-            Text                   = "",
-            ZIndex                 = 10,
-        }).MouseButton1Click:Connect(function()
-            expanded = not expanded
-            Tween(PickerFrame, {Size = UDim2.new(1, 0, 0, expanded and K.PICKER_EXPANDED_H or K.DROPDOWN_H)}, 0.25)
-        end)
-
-        -- Panel
-        local Panel = Create("Frame", {
-            Parent                 = PickerFrame,
-            Position               = UDim2.new(0, 8, 0, 44),
-            Size                   = UDim2.new(1, -16, 0, 96),
-            BackgroundTransparency = 1,
-            BorderSizePixel        = 0,
-        })
-
-        -- SV pad
-        local SVPad = Create("Frame", {
-            Parent           = Panel,
-            Position         = UDim2.new(0, 0, 0, 0),
-            Size             = UDim2.new(1, -26, 0, K.PICKER_PAD_H),
-            BackgroundColor3 = Color3.fromHSV(h, 1, 1),
-            BorderSizePixel  = 0,
-            ClipsDescendants = true,
-            ZIndex           = 2,
-        })
-        AddCorner(SVPad, UDim.new(0, 4))
-
-        local WLayer = Create("Frame", {
-            Parent           = SVPad,
-            Size             = UDim2.new(1, 0, 1, 0),
-            BackgroundColor3 = Color3.new(1, 1, 1),
-            BorderSizePixel  = 0,
-            ZIndex           = 3,
-        })
-        Create("UIGradient", {
-            Parent       = WLayer,
-            Transparency = NumberSequence.new({
-                NumberSequenceKeypoint.new(0, 0),
-                NumberSequenceKeypoint.new(1, 1),
-            }),
-            Rotation = 0,
-        })
-
-        local BLayer = Create("Frame", {
-            Parent           = SVPad,
-            Size             = UDim2.new(1, 0, 1, 0),
-            BackgroundColor3 = Color3.new(0, 0, 0),
-            BorderSizePixel  = 0,
-            ZIndex           = 4,
-        })
-        Create("UIGradient", {
-            Parent       = BLayer,
-            Transparency = NumberSequence.new({
-                NumberSequenceKeypoint.new(0, 1),
-                NumberSequenceKeypoint.new(1, 0),
-            }),
-            Rotation = 90,
-        })
-
-        local SVDrag = Create("TextButton", {
-            Parent                 = SVPad,
-            Size                   = UDim2.new(1, 0, 1, 0),
-            BackgroundTransparency = 1,
-            Text                   = "",
-            ZIndex                 = 6,
-        })
-
-        local SVCursor = Create("Frame", {
-            Parent           = SVPad,
-            Size             = UDim2.new(0, 10, 0, 10),
-            AnchorPoint      = Vector2.new(0.5, 0.5),
-            Position         = UDim2.new(s, 0, 1 - v, 0),
-            BackgroundColor3 = Color3.new(1, 1, 1),
-            BorderSizePixel  = 0,
-            ZIndex           = 7,
-        })
-        AddCorner(SVCursor, UDim.new(1, 0))
-
-        -- Hue bar
-        local HueBar = Create("Frame", {
-            Parent           = Panel,
-            Position         = UDim2.new(1, -20, 0, 0),
-            Size             = UDim2.new(0, 14, 0, K.PICKER_PAD_H),
-            BackgroundColor3 = Color3.new(1, 1, 1),
-            BorderSizePixel  = 0,
-            ClipsDescendants = true,
-            ZIndex           = 2,
-        })
-        AddCorner(HueBar, UDim.new(0, 4))
-        Create("UIGradient", {
-            Parent = HueBar,
-            Color  = ColorSequence.new({
-                ColorSequenceKeypoint.new(0/6, Color3.fromHSV(0/6, 1, 1)),
-                ColorSequenceKeypoint.new(1/6, Color3.fromHSV(1/6, 1, 1)),
-                ColorSequenceKeypoint.new(2/6, Color3.fromHSV(2/6, 1, 1)),
-                ColorSequenceKeypoint.new(3/6, Color3.fromHSV(3/6, 1, 1)),
-                ColorSequenceKeypoint.new(4/6, Color3.fromHSV(4/6, 1, 1)),
-                ColorSequenceKeypoint.new(5/6, Color3.fromHSV(5/6, 1, 1)),
-                ColorSequenceKeypoint.new(1,   Color3.fromHSV(0,   1, 1)),
-            }),
-            Rotation = 90,
-        })
-
-        local HueDrag = Create("TextButton", {
-            Parent                 = HueBar,
-            Size                   = UDim2.new(1, 0, 1, 0),
-            BackgroundTransparency = 1,
-            Text                   = "",
-            ZIndex                 = 3,
-        })
-
-        local HueCursor = Create("Frame", {
-            Parent           = HueBar,
-            Size             = UDim2.new(1, 0, 0, 4),
-            AnchorPoint      = Vector2.new(0, 0.5),
-            Position         = UDim2.new(0, 0, h, 0),
-            BackgroundColor3 = Color3.new(1, 1, 1),
-            BorderSizePixel  = 0,
-            ZIndex           = 4,
-        })
-        AddCorner(HueCursor, UDim.new(1, 0))
-
-        -- Hex input
-        local HexInput = Create("TextBox", {
-            Parent             = Panel,
-            Position           = UDim2.new(0, 0, 0, K.PICKER_PAD_H + 6),
-            Size               = UDim2.new(1, 0, 0, 22),
-            BackgroundColor3   = Aurora.Config.Theme.Surface,
-            BorderSizePixel    = 0,
-            Text               = string.format("#%02X%02X%02X",
-                math.round(color.R * 255),
-                math.round(color.G * 255),
-                math.round(color.B * 255)),
-            TextColor3         = Aurora.Config.Theme.Text,
-            Font               = Aurora.Config.Font,
-            TextSize           = 12,
-            ClearTextOnFocus   = false,
-            ZIndex             = 2,
-        })
-        AddCorner(HexInput, UDim.new(0, 4))
-        Create("UIPadding", {Parent = HexInput, PaddingLeft = UDim.new(0, 8)})
-
-        -- Commit: set direct properties only (no tween during drag)
-        local function Commit()
-            color                    = Color3.fromHSV(h, s, v)
-            Preview.BackgroundColor3 = color
-            SVPad.BackgroundColor3   = Color3.fromHSV(h, 1, 1)
-            SVCursor.Position        = UDim2.new(s, 0, 1 - v, 0)
-            HueCursor.Position       = UDim2.new(0, 0, h, 0)
-            HexInput.Text = string.format("#%02X%02X%02X",
-                math.round(color.R * 255),
-                math.round(color.G * 255),
-                math.round(color.B * 255))
-            if cfg.Callback then cfg.Callback(color) end
-            OnChanged:Fire(color)
-        end
-
-        -- SV drag
-        local svDragging = false
-        SVDrag.InputBegan:Connect(function(inp)
-            if inp.UserInputType == Enum.UserInputType.MouseButton1 then
-                svDragging = true
-                s = math.clamp((inp.Position.X - SVPad.AbsolutePosition.X) / SVPad.AbsoluteSize.X, 0, 1)
-                v = 1 - math.clamp((inp.Position.Y - SVPad.AbsolutePosition.Y) / SVPad.AbsoluteSize.Y, 0, 1)
-                Commit()
-            end
-        end)
-        local svMove = UserInputService.InputChanged:Connect(function(inp)
-            if svDragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
-                s = math.clamp((inp.Position.X - SVPad.AbsolutePosition.X) / SVPad.AbsoluteSize.X, 0, 1)
-                v = 1 - math.clamp((inp.Position.Y - SVPad.AbsolutePosition.Y) / SVPad.AbsoluteSize.Y, 0, 1)
-                Commit()
-            end
-        end)
-        local svEnd = UserInputService.InputEnded:Connect(function(inp)
-            if inp.UserInputType == Enum.UserInputType.MouseButton1 then svDragging = false end
-        end)
-        table.insert(windowConnections, svMove)
-        table.insert(windowConnections, svEnd)
-
-        -- Hue drag
-        local hueDragging = false
-        HueDrag.InputBegan:Connect(function(inp)
-            if inp.UserInputType == Enum.UserInputType.MouseButton1 then
-                hueDragging = true
-                h = math.clamp((inp.Position.Y - HueBar.AbsolutePosition.Y) / HueBar.AbsoluteSize.Y, 0, 1)
-                Commit()
-            end
-        end)
-        local hueMove = UserInputService.InputChanged:Connect(function(inp)
-            if hueDragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
-                h = math.clamp((inp.Position.Y - HueBar.AbsolutePosition.Y) / HueBar.AbsoluteSize.Y, 0, 1)
-                Commit()
-            end
-        end)
-        local hueEnd = UserInputService.InputEnded:Connect(function(inp)
-            if inp.UserInputType == Enum.UserInputType.MouseButton1 then hueDragging = false end
-        end)
-        table.insert(windowConnections, hueMove)
-        table.insert(windowConnections, hueEnd)
-
-        -- FIX: commit hex on blur as well as Enter
-        HexInput.FocusLost:Connect(function()
-            local hex = HexInput.Text:gsub("#", "")
-            if #hex == 6 then
-                local r = tonumber(hex:sub(1, 2), 16)
-                local g = tonumber(hex:sub(3, 4), 16)
-                local b = tonumber(hex:sub(5, 6), 16)
-                if r and g and b then
-                    color    = Color3.fromRGB(r, g, b)
-                    h, s, v  = Color3.toHSV(color)
-                    Commit()
-                end
-            end
-        end)
-
-        return {
-            Frame     = PickerFrame,
-            OnChanged = OnChanged,
-            GetValue  = function() return color end,
-            SetValue  = function(c)
-                color    = c
-                h, s, v  = Color3.toHSV(c)
-                Commit()
-            end,
-        }, PickerFrame
-    end
-
-    -- ── Label ─────────────────────────────────────────────────────────────
-
-    function Builders.Label(tabContent, text)
-        local frame = Create("Frame", {
-            Parent                 = tabContent,
-            Size                   = UDim2.new(1, 0, 0, K.ROW_H_LABEL),
-            BackgroundTransparency = 1,
-        })
-        local lbl = Create("TextLabel", {
-            Parent                 = frame,
-            Size                   = UDim2.new(1, 0, 1, 0),
-            BackgroundTransparency = 1,
-            Text                   = text or "Label",
-            TextColor3             = Aurora.Config.Theme.TextMuted,
-            Font                   = Aurora.Config.Font,
-            TextSize               = 12,
-            TextXAlignment         = Enum.TextXAlignment.Left,
-        })
-        return {
-            Frame   = frame,
-            SetText = function(t) lbl.Text = t end,
-        }, frame
-    end
-
-    -- ── Section ───────────────────────────────────────────────────────────
-
-    function Builders.Section(tabContent, sectionText)
-        local frame = Create("Frame", {
-            Parent                 = tabContent,
-            Size                   = UDim2.new(1, 0, 0, K.ROW_H_SECTION),
-            BackgroundTransparency = 1,
-        })
-        Create("TextLabel", {
-            Parent                 = frame,
-            Size                   = UDim2.new(1, 0, 1, -1),
-            BackgroundTransparency = 1,
-            Text                   = (sectionText or "Section"):upper(),
-            TextColor3             = Aurora.Config.Theme.Primary,
-            Font                   = Aurora.Config.FontBold,
-            TextSize               = 11,
-            TextXAlignment         = Enum.TextXAlignment.Left,
-        })
-        Create("Frame", {
-            Parent           = frame,
-            Position         = UDim2.new(0, 0, 1, -1),
-            Size             = UDim2.new(1, 0, 0, 1),
-            BackgroundColor3 = Aurora.Config.Theme.Border,
-            BorderSizePixel  = 0,
-        })
-        return {Frame = frame}, frame
-    end
-
-    -- ── Table ─────────────────────────────────────────────────────────────
-
-    function Builders.Table(tabContent, cfg)
-        cfg = cfg or {}
-        local columns      = cfg.Columns    or {"Column 1", "Column 2"}
-        local rows         = cfg.Rows       or {}
-        local maxRows      = cfg.MaxVisible or 6
-        local OnRowClicked = Signal.new()
-
-        local numCols = #columns
-        local colW    = 1 / numCols
-
-        local TableFrame = Create("Frame", {
-            Parent           = tabContent,
-            Size             = UDim2.new(1, 0, 0, K.TABLE_HEADER_H + math.min(#rows, maxRows) * K.TABLE_ROW_H),
-            BackgroundColor3 = Aurora.Config.Theme.Background,
-            BorderSizePixel  = 0,
-            ClipsDescendants = false,
-        })
-        AddCorner(TableFrame, UDim.new(0, 4))
-
-        local Header = Create("Frame", {
-            Parent           = TableFrame,
-            Size             = UDim2.new(1, 0, 0, K.TABLE_HEADER_H),
-            BackgroundColor3 = Aurora.Config.Theme.Primary,
-            BorderSizePixel  = 0,
-            ClipsDescendants = true,
-        })
-        AddCorner(Header, UDim.new(0, 4))
-        Create("Frame", {
-            Parent           = Header,
-            Position         = UDim2.new(0, 0, 1, -6),
-            Size             = UDim2.new(1, 0, 0, 6),
-            BackgroundColor3 = Aurora.Config.Theme.Primary,
-            BorderSizePixel  = 0,
-        })
-
-        for i, col in ipairs(columns) do
-            Create("TextLabel", {
-                Parent                 = Header,
-                Position               = UDim2.new((i-1) * colW, 8, 0, 0),
-                Size                   = UDim2.new(colW, -8, 1, 0),
-                BackgroundTransparency = 1,
-                Text                   = col,
-                TextColor3             = Aurora.Config.Theme.Text,
-                Font                   = Aurora.Config.FontBold,
-                TextSize               = 12,
-                TextXAlignment         = Enum.TextXAlignment.Left,
-                TextTruncate           = Enum.TextTruncate.AtEnd,
-            })
-            if i < numCols then
-                Create("Frame", {
-                    Parent                 = Header,
-                    Position               = UDim2.new(i * colW, 0, 0.1, 0),
-                    Size                   = UDim2.new(0, 1, 0.8, 0),
-                    BackgroundColor3       = Color3.new(1, 1, 1),
-                    BackgroundTransparency = 0.7,
-                    BorderSizePixel        = 0,
-                })
-            end
-        end
-
-        local Body = Create("ScrollingFrame", {
-            Parent               = TableFrame,
-            Position             = UDim2.new(0, 0, 0, K.TABLE_HEADER_H),
-            Size                 = UDim2.new(1, 0, 1, -K.TABLE_HEADER_H),
-            BackgroundColor3     = Aurora.Config.Theme.Background,
-            BorderSizePixel      = 0,
-            ScrollBarThickness   = 2,
-            ScrollBarImageColor3 = Aurora.Config.Theme.Border,
-            AutomaticCanvasSize  = Enum.AutomaticSize.Y,
-            CanvasSize           = UDim2.new(0, 0, 0, 0),
-            ClipsDescendants     = true,
-        })
-        AddCorner(Body, UDim.new(0, 4))
-        Create("UIListLayout", {Parent = Body, SortOrder = Enum.SortOrder.LayoutOrder})
-
-        -- FIX: rowObjects stores {frame, labels[]} so SetCell never needs sorting
-        local rowObjects = {}
-
-        local function RenderRow(rowData, index)
-            local isEven   = index % 2 == 0
-            local rowFrame = Create("Frame", {
-                Parent           = Body,
-                Size             = UDim2.new(1, 0, 0, K.TABLE_ROW_H),
-                BackgroundColor3 = isEven and Aurora.Config.Theme.Surface or Aurora.Config.Theme.Background,
-                BorderSizePixel  = 0,
-                LayoutOrder      = index,
-            })
-
-            local cellLabels = {}
-            for c, cell in ipairs(rowData) do
-                local lbl = Create("TextLabel", {
-                    Parent                 = rowFrame,
-                    Position               = UDim2.new((c-1) * colW, 8, 0, 0),
-                    Size                   = UDim2.new(colW, -8, 1, 0),
-                    BackgroundTransparency = 1,
-                    Text                   = tostring(cell),
-                    TextColor3             = Aurora.Config.Theme.Text,
-                    Font                   = Aurora.Config.Font,
-                    TextSize               = 12,
-                    TextXAlignment         = Enum.TextXAlignment.Left,
-                    TextTruncate           = Enum.TextTruncate.AtEnd,
-                })
-                cellLabels[c] = lbl
-            end
-
-            local rowBtn = Create("TextButton", {
-                Parent                 = rowFrame,
-                Size                   = UDim2.new(1, 0, 1, 0),
-                BackgroundTransparency = 1,
-                Text                   = "",
-            })
-            rowBtn.MouseEnter:Connect(function()
-                Tween(rowFrame, {BackgroundColor3 = Color3.fromRGB(40, 40, 55)}, 0.12)
-            end)
-            rowBtn.MouseLeave:Connect(function()
-                Tween(rowFrame, {BackgroundColor3 = isEven and Aurora.Config.Theme.Surface or Aurora.Config.Theme.Background}, 0.12)
-            end)
-            rowBtn.MouseButton1Click:Connect(function()
-                OnRowClicked:Fire(index, rowData)
-            end)
-
-            return {frame = rowFrame, labels = cellLabels}
-        end
-
-        local function Resize()
-            TableFrame.Size = UDim2.new(1, 0, 0, K.TABLE_HEADER_H + math.min(#rows, maxRows) * K.TABLE_ROW_H)
-        end
-
-        for i, rowData in ipairs(rows) do
-            rowObjects[i] = RenderRow(rowData, i)
-        end
-        Resize()
-
-        local element = {
-            Frame        = TableFrame,
-            OnRowClicked = OnRowClicked,
-
-            SetRows = function(newRows)
-                rows = newRows
-                for _, obj in ipairs(rowObjects) do obj.frame:Destroy() end
-                rowObjects = {}
-                for i, rowData in ipairs(rows) do
-                    rowObjects[i] = RenderRow(rowData, i)
-                end
-                Resize()
-            end,
-
-            AddRow = function(rowData)
-                table.insert(rows, rowData)
-                local i = #rows
-                rowObjects[i] = RenderRow(rowData, i)
-                Resize()
-            end,
-
-            RemoveRow = function(index)
-                if not rows[index] then return end
-                table.remove(rows, index)
-                for _, obj in ipairs(rowObjects) do obj.frame:Destroy() end
-                rowObjects = {}
-                for i, rowData in ipairs(rows) do
-                    rowObjects[i] = RenderRow(rowData, i)
-                end
-                Resize()
-            end,
-
-            -- FIX: direct label lookup via cached refs — no sort needed
-            SetCell = function(rowIndex, colIndex, value)
-                if not rows[rowIndex] then return end
-                rows[rowIndex][colIndex] = value
-                local obj = rowObjects[rowIndex]
-                if obj and obj.labels[colIndex] then
-                    obj.labels[colIndex].Text = tostring(value)
-                end
-            end,
-
-            Clear = function()
-                rows = {}
-                for _, obj in ipairs(rowObjects) do obj.frame:Destroy() end
-                rowObjects = {}
-                Resize()
-            end,
-
-            GetRows = function() return rows end,
-        }
-
-        return element, TableFrame
-    end
-
-    -- ─────────────────────────────────────────────────────────────────────
+    -- ─────────────────────────────────────────
     --  Tab creation
-    -- ─────────────────────────────────────────────────────────────────────
+    -- ─────────────────────────────────────────
 
     function Window:CreateTab(tabConfig)
         tabConfig     = tabConfig or {}
@@ -2337,7 +481,7 @@ function Aurora:CreateWindow(config)
         local TabButton = Create("TextButton", {
             Name             = tabName .. "Tab",
             Parent           = TabContainer,
-            Size             = UDim2.new(1, 0, 0, K.TAB_BTN_H),
+            Size             = UDim2.new(1, 0, 0, L.TAB_BTN_H),
             BackgroundColor3 = Aurora.Config.Theme.Background,
             Text             = "",
             AutoButtonColor  = false,
@@ -2348,31 +492,34 @@ function Aurora:CreateWindow(config)
 
         if tabIcon ~= "" then
             Create("ImageLabel", {
-                Name                   = "Icon",
-                Parent                 = TabButton,
-                Position               = UDim2.new(0, 8, 0.5, -8),
-                Size                   = UDim2.new(0, 16, 0, 16),
+                Name               = "Icon",
+                Parent             = TabButton,
+                Position           = UDim2.new(0, L.TAB_ICON_X, 0.5, -L.TAB_ICON_SIZE / 2),
+                Size               = UDim2.new(0, L.TAB_ICON_SIZE, 0, L.TAB_ICON_SIZE),
                 BackgroundTransparency = 1,
-                Image                  = tabIcon,
-                ImageColor3            = Aurora.Config.Theme.TextMuted,
+                Image              = tabIcon,
+                ImageColor3        = Aurora.Config.Theme.TextMuted,
             })
         end
 
-        local iconOffset = (tabIcon ~= "") and 30 or 10
+        local iconOffset = (tabIcon ~= "") and L.TAB_ICON_OFFSET or L.TAB_LABEL_X
         local TabLabel = Create("TextLabel", {
-            Name                   = "Label",
-            Parent                 = TabButton,
-            Position               = UDim2.new(0, iconOffset, 0, 0),
-            Size                   = UDim2.new(0, 0, 1, 0),
-            AutomaticSize          = Enum.AutomaticSize.X,
+            Name               = "Label",
+            Parent             = TabButton,
+            Position           = UDim2.new(0, iconOffset, 0, 0),
+            Size               = UDim2.new(0, 0, 1, 0),
+            AutomaticSize      = Enum.AutomaticSize.X,
             BackgroundTransparency = 1,
-            Text                   = tabName,
-            TextColor3             = Aurora.Config.Theme.TextMuted,
-            Font                   = Aurora.Config.FontMedium,
-            TextSize               = 13,
-            TextXAlignment         = Enum.TextXAlignment.Left,
+            Text               = tabName,
+            TextColor3         = Aurora.Config.Theme.TextMuted,
+            Font               = Aurora.Config.FontMedium,
+            TextSize           = 13,
+            TextXAlignment     = Enum.TextXAlignment.Left,
         })
-        Create("UIPadding", {Parent = TabLabel, PaddingRight = UDim.new(0, 10)})
+        Create("UIPadding", {
+            Parent       = TabLabel,
+            PaddingRight = UDim.new(0, 10),
+        })
 
         local TabContent = Create("ScrollingFrame", {
             Name                 = tabName .. "Content",
@@ -2386,7 +533,11 @@ function Aurora:CreateWindow(config)
             AutomaticCanvasSize  = Enum.AutomaticSize.Y,
             CanvasSize           = UDim2.new(0, 0, 0, 0),
         })
-        Create("UIListLayout", {Parent = TabContent, Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder})
+        Create("UIListLayout", {
+            Parent    = TabContent,
+            Padding   = UDim.new(0, 8),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        })
         Create("UIPadding", {
             Parent        = TabContent,
             PaddingTop    = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10),
@@ -2401,16 +552,17 @@ function Aurora:CreateWindow(config)
             OnElementAdded = Signal.new(),
         }
 
+        -- Empty-state placeholder
         local EmptyState = Create("TextLabel", {
-            Parent                 = TabContent,
-            Size                   = UDim2.new(1, 0, 0, 40),
+            Parent             = TabContent,
+            Size               = UDim2.new(1, 0, 0, 40),
             BackgroundTransparency = 1,
-            Text                   = "No elements yet.",
-            TextColor3             = Aurora.Config.Theme.Border,
-            Font                   = Aurora.Config.Font,
-            TextSize               = 13,
-            TextXAlignment         = Enum.TextXAlignment.Center,
-            LayoutOrder            = 9999,
+            Text               = "No elements yet.",
+            TextColor3         = Aurora.Config.Theme.Border,
+            Font               = Aurora.Config.Font,
+            TextSize           = 13,
+            TextXAlignment     = Enum.TextXAlignment.Center,
+            LayoutOrder        = 9999,
         })
 
         local function Activate()
@@ -2426,14 +578,14 @@ function Aurora:CreateWindow(config)
                 oldTab.Content.Visible = false
             end
 
-            Window.ActiveTab     = Tab
-            TabContent.Visible   = true
-            TabContent.CanvasPosition = Vector2.new(0, 0)
+            Window.ActiveTab = Tab
             Tween(TabButton, {BackgroundColor3 = Aurora.Config.Theme.Primary}, 0.2)
             Tween(TabLabel,  {TextColor3 = Aurora.Config.Theme.Text}, 0.2)
             if TabButton:FindFirstChild("Icon") then
                 Tween(TabButton.Icon, {ImageColor3 = Aurora.Config.Theme.Text}, 0.2)
             end
+            TabContent.Visible = true
+            TabContent.CanvasPosition = Vector2.new(0, 0)
 
             Window.OnTabChanged:Fire(Tab, oldTab)
         end
@@ -2441,76 +593,1714 @@ function Aurora:CreateWindow(config)
         Tab.Activate = Activate
         TabButton.MouseButton1Click:Connect(Activate)
 
-        -- ── Thin wrappers that call into Builders ─────────────────────────
-        -- Each Tab:CreateXxx() passes TabContent into the builder, then
-        -- calls RegisterElement to attach lifecycle methods.
+        -- ─────────────────────────────────────
+        --  Element helpers
+        -- ─────────────────────────────────────
+
+        -- All elements are children of TabContent; BaseFrame keeps their
+        -- LayoutOrder consistent with the UIListLayout.
+        local function BaseFrame(height)
+            local f = Create("Frame", {
+                Parent           = TabContent,
+                Size             = UDim2.new(1, 0, 0, height),
+                BackgroundColor3 = Aurora.Config.Theme.Background,
+                BorderSizePixel  = 0,
+            })
+            AddCorner(f, L.ELEM_CORNER)
+            return f
+        end
+
+        local function RegisterElement(element, frame)
+            if #Tab.Elements == 0 then
+                EmptyState.Visible = false
+            end
+            table.insert(Tab.Elements, element)
+            Tab.OnElementAdded:Fire(element)
+
+            element.Destroy = function()
+                frame:Destroy()
+                for i, e in ipairs(Tab.Elements) do
+                    if e == element then table.remove(Tab.Elements, i); break end
+                end
+                if #Tab.Elements == 0 then EmptyState.Visible = true end
+            end
+
+            element.SetVisible = function(visible)
+                frame.Visible = visible
+            end
+
+            -- [FIX] Guard against double-disabling: only store _origColor once,
+            --       and skip the tween pass if already in the target state.
+            element.SetEnabled = function(enabled)
+                local overlay = frame:FindFirstChild("_DisabledOverlay")
+                if enabled then
+                    if overlay then overlay:Destroy() end
+                    for _, lbl in ipairs(frame:GetDescendants()) do
+                        if lbl:IsA("TextLabel") or lbl:IsA("TextButton") or lbl:IsA("TextBox") then
+                            local stored = lbl:GetAttribute("_origColor")
+                            if stored then
+                                lbl:SetAttribute("_origColor", nil)
+                                Tween(lbl, {TextColor3 = Color3.fromHex(stored)}, 0.15)
+                            end
+                        end
+                    end
+                else
+                    if overlay then return end   -- [FIX] already disabled — do nothing
+                    for _, lbl in ipairs(frame:GetDescendants()) do
+                        if lbl:IsA("TextLabel") or lbl:IsA("TextButton") or lbl:IsA("TextBox") then
+                            lbl:SetAttribute("_origColor", lbl.TextColor3:ToHex())
+                            Tween(lbl, {TextColor3 = Aurora.Config.Theme.Border}, 0.15)
+                        end
+                    end
+                    overlay = Create("TextButton", {
+                        Name               = "_DisabledOverlay",
+                        Parent             = frame,
+                        Size               = UDim2.new(1, 0, 1, 0),
+                        BackgroundColor3   = Aurora.Config.Theme.Background,
+                        BackgroundTransparency = 0.5,
+                        BorderSizePixel    = 0,
+                        ZIndex             = 99,
+                        Text               = "",
+                        AutoButtonColor    = false,
+                    })
+                    AddCorner(overlay, L.ELEM_CORNER)
+                end
+            end
+
+            return element
+        end
+
+        -- ── Button ────────────────────────────
 
         function Tab:CreateButton(cfg)
-            local el, frame = Builders.Button(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame, cfg)
+            cfg = cfg or {}
+            local frame = BaseFrame(L.ELEM_H_SM)
+            local btn = Create("TextButton", {
+                Parent             = frame,
+                Size               = UDim2.new(1, 0, 1, 0),
+                BackgroundTransparency = 1,
+                Text               = cfg.Text or "Button",
+                TextColor3         = Aurora.Config.Theme.Text,
+                Font               = Aurora.Config.FontMedium,
+                TextSize           = 14,
+                AutoButtonColor    = false,
+            })
+            local HOVER_BG = Color3.fromRGB(35, 35, 45)
+            btn.MouseEnter:Connect(function()
+                Tween(frame, {BackgroundColor3 = HOVER_BG}, 0.15)
+            end)
+            btn.MouseLeave:Connect(function()
+                Tween(frame, {BackgroundColor3 = Aurora.Config.Theme.Background}, 0.15)
+            end)
+            btn.MouseButton1Down:Connect(function()
+                Tween(frame, {BackgroundColor3 = Aurora.Config.Theme.Primary}, 0.1)
+            end)
+            btn.MouseButton1Up:Connect(function()
+                Tween(frame, {BackgroundColor3 = HOVER_BG}, 0.1)
+            end)
+            btn.MouseButton1Click:Connect(cfg.Callback or function() end)
+
+            return RegisterElement({
+                Frame   = frame,
+                SetText = function(t) btn.Text = t end,
+            }, frame)
         end
+
+        -- ── Toggle ────────────────────────────
 
         function Tab:CreateToggle(cfg)
-            local el, frame = Builders.Toggle(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame, cfg)
+            cfg = cfg or {}
+            local toggled   = cfg.Default or false
+            local OnChanged = Signal.new()
+            local frame     = BaseFrame(L.ELEM_H_SM)
+
+            local TRACK_X = L.TOGGLE_X_OFF  -- offset from right edge
+
+            Create("TextLabel", {
+                Parent             = frame,
+                Position           = UDim2.new(0, L.ELEM_PAD_X, 0, 0),
+                Size               = UDim2.new(1, TRACK_X - L.TOGGLE_TRACK_W - 6, 1, 0),
+                BackgroundTransparency = 1,
+                Text               = cfg.Text or "Toggle",
+                TextColor3         = Aurora.Config.Theme.Text,
+                Font               = Aurora.Config.FontMedium,
+                TextSize           = 14,
+                TextXAlignment     = Enum.TextXAlignment.Left,
+            })
+
+            local Track = Create("Frame", {
+                Parent           = frame,
+                Position         = UDim2.new(1, TRACK_X, 0.5, -L.TOGGLE_TRACK_H / 2),
+                Size             = UDim2.new(0, L.TOGGLE_TRACK_W, 0, L.TOGGLE_TRACK_H),
+                BackgroundColor3 = toggled and Aurora.Config.Theme.Primary or Aurora.Config.Theme.Border,
+                BorderSizePixel  = 0,
+            })
+            AddCorner(Track, UDim.new(1, 0))
+
+            local CIRCLE_OFF  = UDim2.new(0, 2, 0.5, -L.TOGGLE_CIRCLE / 2)
+            local CIRCLE_ON   = UDim2.new(1, -(L.TOGGLE_CIRCLE + 2), 0.5, -L.TOGGLE_CIRCLE / 2)
+
+            local Circle = Create("Frame", {
+                Parent           = Track,
+                Position         = toggled and CIRCLE_ON or CIRCLE_OFF,
+                Size             = UDim2.new(0, L.TOGGLE_CIRCLE, 0, L.TOGGLE_CIRCLE),
+                BackgroundColor3 = Color3.new(1, 1, 1),
+                BorderSizePixel  = 0,
+            })
+            AddCorner(Circle, UDim.new(1, 0))
+
+            local function Refresh(silent)
+                Tween(Track,  {BackgroundColor3 = toggled and Aurora.Config.Theme.Primary or Aurora.Config.Theme.Border}, 0.2)
+                Tween(Circle, {Position = toggled and CIRCLE_ON or CIRCLE_OFF}, 0.2)
+                if not silent then
+                    if cfg.Callback then cfg.Callback(toggled) end
+                    OnChanged:Fire(toggled)
+                end
+            end
+
+            Create("TextButton", {
+                Parent             = frame,
+                Size               = UDim2.new(1, 0, 1, 0),
+                BackgroundTransparency = 1,
+                Text               = "",
+            }).MouseButton1Click:Connect(function()
+                toggled = not toggled
+                Refresh(false)
+            end)
+
+            return RegisterElement({
+                Frame     = frame,
+                OnChanged = OnChanged,
+                GetValue  = function() return toggled end,
+                SetValue  = function(val)
+                    if toggled ~= val then
+                        toggled = val
+                        Refresh(false)
+                    end
+                end,
+            }, frame)
         end
+
+        -- ── Slider ────────────────────────────
 
         function Tab:CreateSlider(cfg)
-            local el, frame = Builders.Slider(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame, cfg)
+            cfg = cfg or {}
+            local min       = cfg.Min       or 0
+            local max       = cfg.Max       or 100
+            local increment = cfg.Increment or 1
+            local current   = math.clamp(cfg.Default or min, min, max)
+            local OnChanged = Signal.new()
+            local frame     = BaseFrame(L.ELEM_H_MD)
+
+            local HALF_KNOB = L.SLIDER_KNOB / 2
+
+            Create("TextLabel", {
+                Parent             = frame,
+                Position           = UDim2.new(0, L.ELEM_PAD_X, 0, 8),
+                Size               = UDim2.new(1, -60, 0, 16),
+                BackgroundTransparency = 1,
+                Text               = cfg.Text or "Slider",
+                TextColor3         = Aurora.Config.Theme.Text,
+                Font               = Aurora.Config.FontMedium,
+                TextSize           = 14,
+                TextXAlignment     = Enum.TextXAlignment.Left,
+            })
+
+            local ValueLabel = Create("TextLabel", {
+                Parent             = frame,
+                Position           = UDim2.new(1, -52, 0, 8),
+                Size               = UDim2.new(0, 42, 0, 16),
+                BackgroundTransparency = 1,
+                Text               = tostring(current),
+                TextColor3         = Aurora.Config.Theme.Primary,
+                Font               = Aurora.Config.FontBold,
+                TextSize           = 14,
+                TextXAlignment     = Enum.TextXAlignment.Right,
+            })
+
+            local Bar = Create("Frame", {
+                Parent           = frame,
+                Position         = UDim2.new(0, L.ELEM_PAD_X, 0, L.SLIDER_BAR_Y),
+                Size             = UDim2.new(1, -L.ELEM_PAD_X * 2, 0, L.SLIDER_BAR_H),
+                BackgroundColor3 = Aurora.Config.Theme.Border,
+                BorderSizePixel  = 0,
+            })
+            AddCorner(Bar, UDim.new(1, 0))
+
+            local Fill = Create("Frame", {
+                Parent           = Bar,
+                Size             = UDim2.new((current - min) / (max - min), 0, 1, 0),
+                BackgroundColor3 = Aurora.Config.Theme.Primary,
+                BorderSizePixel  = 0,
+            })
+            AddCorner(Fill, UDim.new(1, 0))
+
+            local Knob = Create("Frame", {
+                Parent           = Bar,
+                Position         = UDim2.new((current - min) / (max - min), -HALF_KNOB, 0.5, -HALF_KNOB),
+                Size             = UDim2.new(0, L.SLIDER_KNOB, 0, L.SLIDER_KNOB),
+                BackgroundColor3 = Color3.new(1, 1, 1),
+                BorderSizePixel  = 0,
+            })
+            AddCorner(Knob, UDim.new(1, 0))
+
+            local function Apply(inputX)
+                local pct   = math.clamp((inputX - Bar.AbsolutePosition.X) / Bar.AbsoluteSize.X, 0, 1)
+                local raw   = min + (max - min) * pct
+                local value = math.clamp(math.floor(raw / increment + 0.5) * increment, min, max)
+                if value == current then return end
+                current = value
+                local f = (value - min) / (max - min)
+                Fill.Size       = UDim2.new(f, 0, 1, 0)
+                Knob.Position   = UDim2.new(f, -HALF_KNOB, 0.5, -HALF_KNOB)
+                ValueLabel.Text = tostring(value)
+                if cfg.Callback then cfg.Callback(value) end
+                OnChanged:Fire(value)
+            end
+
+            -- [PERF] Connections are created on drag-start and destroyed on drag-end.
+            local dragging = false
+            local moveConn, endConn
+
+            local function StopDrag()
+                dragging = false
+                if moveConn then moveConn:Disconnect(); moveConn = nil end
+                if endConn  then endConn:Disconnect();  endConn  = nil end
+            end
+
+            local function StartDrag(startX)
+                if dragging then return end
+                dragging = true
+                if startX then Apply(startX) end
+                moveConn = UserInputService.InputChanged:Connect(function(inp)
+                    if inp.UserInputType == Enum.UserInputType.MouseMovement then
+                        Apply(inp.Position.X)
+                    end
+                end)
+                endConn = UserInputService.InputEnded:Connect(function(inp)
+                    if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+                        StopDrag()
+                    end
+                end)
+            end
+
+            Knob.InputBegan:Connect(function(inp)
+                if inp.UserInputType == Enum.UserInputType.MouseButton1 then StartDrag() end
+            end)
+            Bar.InputBegan:Connect(function(inp)
+                if inp.UserInputType == Enum.UserInputType.MouseButton1 then StartDrag(inp.Position.X) end
+            end)
+
+            return RegisterElement({
+                Frame     = frame,
+                OnChanged = OnChanged,
+                GetValue  = function() return current end,
+                -- [FIX] SetValue now fires callback and OnChanged, matching Toggle behaviour.
+                SetValue  = function(val)
+                    val = math.clamp(math.floor(val / increment + 0.5) * increment, min, max)
+                    if val == current then return end
+                    current = val
+                    local f = (val - min) / (max - min)
+                    Fill.Size       = UDim2.new(f, 0, 1, 0)
+                    Knob.Position   = UDim2.new(f, -HALF_KNOB, 0.5, -HALF_KNOB)
+                    ValueLabel.Text = tostring(val)
+                    if cfg.Callback then cfg.Callback(val) end
+                    OnChanged:Fire(val)
+                end,
+            }, frame)
         end
+
+        -- ── Dropdown ─────────────────────────
+        -- [FIX] Now uses BaseFrame so it sits correctly in the UIListLayout.
+        -- [API] Exposes SetOptions(newOptions) for dynamic option lists.
 
         function Tab:CreateDropdown(cfg)
-            local el, frame = Builders.Dropdown(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame, cfg)
+            cfg = cfg or {}
+            local options   = cfg.Options or {}
+            local selected  = cfg.Default or "Select..."
+            local expanded  = false
+            local OnChanged = Signal.new()
+            local ROW_H     = 30
+            local labelText = cfg.Text or "Dropdown"
+
+            -- Use a plain Frame parented to TabContent (same as BaseFrame) so that
+            -- LayoutOrder is respected by the UIListLayout.
+            local DropdownFrame = Create("Frame", {
+                Parent           = TabContent,
+                Size             = UDim2.new(1, 0, 0, L.ELEM_H_SM),
+                BackgroundColor3 = Aurora.Config.Theme.Background,
+                BorderSizePixel  = 0,
+                ClipsDescendants = true,
+            })
+            AddCorner(DropdownFrame, L.ELEM_CORNER)
+
+            local Label = Create("TextLabel", {
+                Parent             = DropdownFrame,
+                Position           = UDim2.new(0, L.ELEM_PAD_X, 0, 0),
+                Size               = UDim2.new(1, -38, 0, L.ELEM_H_SM),
+                BackgroundTransparency = 1,
+                Text               = labelText .. ": " .. selected,
+                TextColor3         = Aurora.Config.Theme.Text,
+                Font               = Aurora.Config.FontMedium,
+                TextSize           = 14,
+                TextXAlignment     = Enum.TextXAlignment.Left,
+                TextTruncate       = Enum.TextTruncate.AtEnd,
+            })
+
+            local Arrow = Create("TextLabel", {
+                Parent             = DropdownFrame,
+                Position           = UDim2.new(1, -28, 0, 0),
+                Size               = UDim2.new(0, 20, 0, L.ELEM_H_SM),
+                BackgroundTransparency = 1,
+                Text               = "▼",
+                TextColor3         = Aurora.Config.Theme.TextMuted,
+                Font               = Aurora.Config.FontBold,
+                TextSize           = 11,
+            })
+
+            local OptionsFrame = Create("Frame", {
+                Parent           = DropdownFrame,
+                Position         = UDim2.new(0, 0, 0, L.ELEM_H_SM),
+                Size             = UDim2.new(1, 0, 0, #options * ROW_H),
+                BackgroundColor3 = Aurora.Config.Theme.Surface,
+                BorderSizePixel  = 0,
+                ClipsDescendants = true,
+            })
+            Create("UIListLayout", {Parent = OptionsFrame, SortOrder = Enum.SortOrder.LayoutOrder})
+
+            local optionBtns = {}
+
+            local function BuildOptions()
+                -- Clear existing buttons
+                for _, b in ipairs(optionBtns) do b:Destroy() end
+                optionBtns = {}
+                OptionsFrame.Size = UDim2.new(1, 0, 0, #options * ROW_H)
+
+                for i, option in ipairs(options) do
+                    local ob = Create("TextButton", {
+                        Parent           = OptionsFrame,
+                        Size             = UDim2.new(1, 0, 0, ROW_H),
+                        BackgroundColor3 = Aurora.Config.Theme.Surface,
+                        Text             = option,
+                        TextColor3       = Aurora.Config.Theme.TextMuted,
+                        Font             = Aurora.Config.FontMedium,
+                        TextSize         = 13,
+                        LayoutOrder      = i,
+                        AutoButtonColor  = false,
+                    })
+                    ob.MouseEnter:Connect(function()
+                        Tween(ob, {BackgroundColor3 = Aurora.Config.Theme.Background, TextColor3 = Aurora.Config.Theme.Text}, 0.15)
+                    end)
+                    ob.MouseLeave:Connect(function()
+                        Tween(ob, {BackgroundColor3 = Aurora.Config.Theme.Surface, TextColor3 = Aurora.Config.Theme.TextMuted}, 0.15)
+                    end)
+                    ob.MouseButton1Click:Connect(function()
+                        selected   = option
+                        Label.Text = labelText .. ": " .. option
+                        if cfg.Callback then cfg.Callback(option) end
+                        OnChanged:Fire(option)
+                        expanded = false
+                        Tween(DropdownFrame, {Size = UDim2.new(1, 0, 0, L.ELEM_H_SM)}, 0.2)
+                        Tween(Arrow, {Rotation = 0}, 0.2)
+                    end)
+                    optionBtns[i] = ob
+                end
+            end
+
+            BuildOptions()
+
+            Create("TextButton", {
+                Parent             = DropdownFrame,
+                Size               = UDim2.new(1, 0, 0, L.ELEM_H_SM),
+                BackgroundTransparency = 1,
+                Text               = "",
+            }).MouseButton1Click:Connect(function()
+                expanded = not expanded
+                Tween(DropdownFrame, {Size = UDim2.new(1, 0, 0, expanded and L.ELEM_H_SM + #options * ROW_H or L.ELEM_H_SM)}, 0.2)
+                Tween(Arrow, {Rotation = expanded and 180 or 0}, 0.2)
+            end)
+
+            return RegisterElement({
+                Frame     = DropdownFrame,
+                OnChanged = OnChanged,
+                GetValue  = function() return selected end,
+                SetValue  = function(val)
+                    if table.find(options, val) then
+                        selected   = val
+                        Label.Text = labelText .. ": " .. val
+                    end
+                end,
+                -- [API] Replace the option list at runtime.
+                SetOptions = function(newOptions)
+                    options  = newOptions
+                    selected = "Select..."
+                    Label.Text = labelText .. ": " .. selected
+                    expanded = false
+                    Tween(DropdownFrame, {Size = UDim2.new(1, 0, 0, L.ELEM_H_SM)}, 0.15)
+                    Tween(Arrow, {Rotation = 0}, 0.15)
+                    BuildOptions()
+                end,
+            }, DropdownFrame)
         end
+
+        -- ── SearchDropdown ────────────────────
 
         function Tab:CreateSearchDropdown(cfg)
-            local el, frame = Builders.SearchDropdown(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame, cfg)
+            cfg = cfg or {}
+            local options   = cfg.Options or {}
+            local selected  = cfg.Default or "Select..."
+            local expanded  = false
+            local OnChanged = Signal.new()
+            local labelText = cfg.Text or "Search"
+            local MAX_VIS   = cfg.MaxVisible or 6
+            local ROW_H     = 30
+
+            local DropFrame = Create("Frame", {
+                Parent           = TabContent,
+                Size             = UDim2.new(1, 0, 0, L.ELEM_H_SM),
+                BackgroundColor3 = Aurora.Config.Theme.Background,
+                BorderSizePixel  = 0,
+                ClipsDescendants = true,
+            })
+            AddCorner(DropFrame, L.ELEM_CORNER)
+
+            local HeaderLabel = Create("TextLabel", {
+                Parent             = DropFrame,
+                Position           = UDim2.new(0, L.ELEM_PAD_X, 0, 0),
+                Size               = UDim2.new(1, -38, 0, L.ELEM_H_SM),
+                BackgroundTransparency = 1,
+                Text               = labelText .. ": " .. selected,
+                TextColor3         = Aurora.Config.Theme.Text,
+                Font               = Aurora.Config.FontMedium,
+                TextSize           = 14,
+                TextXAlignment     = Enum.TextXAlignment.Left,
+                TextTruncate       = Enum.TextTruncate.AtEnd,
+            })
+
+            local Arrow = Create("TextLabel", {
+                Parent             = DropFrame,
+                Position           = UDim2.new(1, -28, 0, 0),
+                Size               = UDim2.new(0, 20, 0, L.ELEM_H_SM),
+                BackgroundTransparency = 1,
+                Text               = "▼",
+                TextColor3         = Aurora.Config.Theme.TextMuted,
+                Font               = Aurora.Config.FontBold,
+                TextSize           = 11,
+            })
+
+            -- Search box (visible only when expanded)
+            local SEARCHBOX_Y  = L.ELEM_H_SM + 2
+            local SEARCHBOX_H  = 24
+            local LIST_Y       = SEARCHBOX_Y + SEARCHBOX_H + 4
+
+            local SearchBox = Create("TextBox", {
+                Parent             = DropFrame,
+                Position           = UDim2.new(0, 6, 0, SEARCHBOX_Y),
+                Size               = UDim2.new(1, -12, 0, SEARCHBOX_H),
+                BackgroundColor3   = Aurora.Config.Theme.Surface,
+                BorderSizePixel    = 0,
+                Text               = "",
+                PlaceholderText    = "Search...",
+                PlaceholderColor3  = Aurora.Config.Theme.TextMuted,
+                TextColor3         = Aurora.Config.Theme.Text,
+                Font               = Aurora.Config.Font,
+                TextSize           = 12,
+                ClearTextOnFocus   = true,
+            })
+            AddCorner(SearchBox, UDim.new(0, 4))
+            Create("UIPadding", {Parent = SearchBox, PaddingLeft = UDim.new(0, 8)})
+
+            local ListFrame = Create("ScrollingFrame", {
+                Parent               = DropFrame,
+                Position             = UDim2.new(0, 0, 0, LIST_Y),
+                Size                 = UDim2.new(1, 0, 0, math.min(#options, MAX_VIS) * ROW_H),
+                BackgroundColor3     = Aurora.Config.Theme.Surface,
+                BorderSizePixel      = 0,
+                ScrollBarThickness   = 2,
+                ScrollBarImageColor3 = Aurora.Config.Theme.Border,
+                AutomaticCanvasSize  = Enum.AutomaticSize.Y,
+                CanvasSize           = UDim2.new(0, 0, 0, 0),
+                ClipsDescendants     = true,
+            })
+            Create("UIListLayout", {Parent = ListFrame, SortOrder = Enum.SortOrder.LayoutOrder})
+
+            local optionBtns = {}
+
+            local function BuildOptions()
+                for _, b in ipairs(optionBtns) do b:Destroy() end
+                optionBtns = {}
+
+                for i, option in ipairs(options) do
+                    local ob = Create("TextButton", {
+                        Parent           = ListFrame,
+                        Size             = UDim2.new(1, 0, 0, ROW_H),
+                        BackgroundColor3 = Aurora.Config.Theme.Surface,
+                        Text             = option,
+                        TextColor3       = Aurora.Config.Theme.TextMuted,
+                        Font             = Aurora.Config.FontMedium,
+                        TextSize         = 13,
+                        LayoutOrder      = i,
+                        AutoButtonColor  = false,
+                    })
+                    ob.MouseEnter:Connect(function()
+                        Tween(ob, {BackgroundColor3 = Aurora.Config.Theme.Background, TextColor3 = Aurora.Config.Theme.Text}, 0.15)
+                    end)
+                    ob.MouseLeave:Connect(function()
+                        Tween(ob, {BackgroundColor3 = Aurora.Config.Theme.Surface, TextColor3 = Aurora.Config.Theme.TextMuted}, 0.15)
+                    end)
+                    ob.MouseButton1Click:Connect(function()
+                        selected         = option
+                        HeaderLabel.Text = labelText .. ": " .. option
+                        SearchBox.Text   = ""
+                        if cfg.Callback then cfg.Callback(option) end
+                        OnChanged:Fire(option)
+                        for _, btn in ipairs(optionBtns) do btn.Visible = true end
+                        expanded = false
+                        Tween(DropFrame, {Size = UDim2.new(1, 0, 0, L.ELEM_H_SM)}, 0.2)
+                        Tween(Arrow, {Rotation = 0}, 0.2)
+                    end)
+                    optionBtns[i] = ob
+                end
+            end
+
+            BuildOptions()
+
+            -- Live filter
+            SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+                local query  = SearchBox.Text:lower()
+                local visible = 0
+                for i, opt in ipairs(options) do
+                    local show = query == "" or opt:lower():find(query, 1, true) ~= nil
+                    optionBtns[i].Visible = show
+                    if show then visible = visible + 1 end
+                end
+                local newH    = math.min(visible, MAX_VIS) * ROW_H
+                ListFrame.Size = UDim2.new(1, 0, 0, newH)
+                DropFrame.Size = UDim2.new(1, 0, 0, LIST_Y + newH)
+            end)
+
+            local function ExpandedH()
+                return LIST_Y + math.min(#options, MAX_VIS) * ROW_H
+            end
+
+            Create("TextButton", {
+                Parent             = DropFrame,
+                Size               = UDim2.new(1, 0, 0, L.ELEM_H_SM),
+                BackgroundTransparency = 1,
+                Text               = "",
+            }).MouseButton1Click:Connect(function()
+                expanded = not expanded
+                if expanded then
+                    Tween(DropFrame, {Size = UDim2.new(1, 0, 0, ExpandedH())}, 0.2)
+                    Tween(Arrow, {Rotation = 180}, 0.2)
+                    SearchBox.Text = ""
+                    for _, btn in ipairs(optionBtns) do btn.Visible = true end
+                    ListFrame.Size = UDim2.new(1, 0, 0, math.min(#options, MAX_VIS) * ROW_H)
+                else
+                    Tween(DropFrame, {Size = UDim2.new(1, 0, 0, L.ELEM_H_SM)}, 0.2)
+                    Tween(Arrow, {Rotation = 0}, 0.2)
+                end
+            end)
+
+            return RegisterElement({
+                Frame     = DropFrame,
+                OnChanged = OnChanged,
+                GetValue  = function() return selected end,
+                SetValue  = function(val)
+                    if table.find(options, val) then
+                        selected         = val
+                        HeaderLabel.Text = labelText .. ": " .. val
+                    end
+                end,
+                -- [API] Replace options at runtime.
+                SetOptions = function(newOptions)
+                    options  = newOptions
+                    selected = "Select..."
+                    HeaderLabel.Text = labelText .. ": " .. selected
+                    expanded = false
+                    Tween(DropFrame, {Size = UDim2.new(1, 0, 0, L.ELEM_H_SM)}, 0.15)
+                    Tween(Arrow, {Rotation = 0}, 0.15)
+                    BuildOptions()
+                end,
+            }, DropFrame)
         end
+
+        -- ── MultiSelect ───────────────────────
 
         function Tab:CreateMultiSelect(cfg)
-            local el, frame = Builders.MultiSelect(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame, cfg)
+            cfg = cfg or {}
+            local options   = cfg.Options or {}
+            local selected  = {}
+            local expanded  = false
+            local OnChanged = Signal.new()
+            local labelText = cfg.Text or "Select"
+            local ROW_H     = 30
+
+            for _, opt in ipairs(cfg.Default or {}) do
+                selected[opt] = true
+            end
+
+            local function SelectedList()
+                local t = {}
+                for _, opt in ipairs(options) do
+                    if selected[opt] then t[#t + 1] = opt end
+                end
+                return t
+            end
+
+            local function HeaderText()
+                local list = SelectedList()
+                if #list == 0     then return labelText .. ": None"
+                elseif #list == 1 then return labelText .. ": " .. list[1]
+                else                   return labelText .. ": " .. #list .. " selected" end
+            end
+
+            local MultiFrame = Create("Frame", {
+                Parent           = TabContent,
+                Size             = UDim2.new(1, 0, 0, L.ELEM_H_SM),
+                BackgroundColor3 = Aurora.Config.Theme.Background,
+                BorderSizePixel  = 0,
+                ClipsDescendants = true,
+            })
+            AddCorner(MultiFrame, L.ELEM_CORNER)
+
+            local Label = Create("TextLabel", {
+                Parent             = MultiFrame,
+                Position           = UDim2.new(0, L.ELEM_PAD_X, 0, 0),
+                Size               = UDim2.new(1, -38, 0, L.ELEM_H_SM),
+                BackgroundTransparency = 1,
+                Text               = HeaderText(),
+                TextColor3         = Aurora.Config.Theme.Text,
+                Font               = Aurora.Config.FontMedium,
+                TextSize           = 14,
+                TextXAlignment     = Enum.TextXAlignment.Left,
+                TextTruncate       = Enum.TextTruncate.AtEnd,
+            })
+
+            local Arrow = Create("TextLabel", {
+                Parent             = MultiFrame,
+                Position           = UDim2.new(1, -28, 0, 0),
+                Size               = UDim2.new(0, 20, 0, L.ELEM_H_SM),
+                BackgroundTransparency = 1,
+                Text               = "▼",
+                TextColor3         = Aurora.Config.Theme.TextMuted,
+                Font               = Aurora.Config.FontBold,
+                TextSize           = 11,
+            })
+
+            local OptionsFrame = Create("Frame", {
+                Parent           = MultiFrame,
+                Position         = UDim2.new(0, 0, 0, L.ELEM_H_SM),
+                Size             = UDim2.new(1, 0, 0, #options * ROW_H),
+                BackgroundColor3 = Aurora.Config.Theme.Surface,
+                BorderSizePixel  = 0,
+                ClipsDescendants = true,
+            })
+            Create("UIListLayout", {Parent = OptionsFrame, SortOrder = Enum.SortOrder.LayoutOrder})
+
+            local rowObjects = {}
+
+            local function BuildOptions()
+                for _, r in ipairs(rowObjects) do r:Destroy() end
+                rowObjects = {}
+                OptionsFrame.Size = UDim2.new(1, 0, 0, #options * ROW_H)
+
+                for i, option in ipairs(options) do
+                    local row = Create("Frame", {
+                        Parent           = OptionsFrame,
+                        Size             = UDim2.new(1, 0, 0, ROW_H),
+                        BackgroundColor3 = Aurora.Config.Theme.Surface,
+                        BorderSizePixel  = 0,
+                        LayoutOrder      = i,
+                    })
+
+                    local Box = Create("Frame", {
+                        Parent           = row,
+                        Position         = UDim2.new(0, 8, 0.5, -8),
+                        Size             = UDim2.new(0, 16, 0, 16),
+                        BackgroundColor3 = selected[option] and Aurora.Config.Theme.Primary or Aurora.Config.Theme.Border,
+                        BorderSizePixel  = 0,
+                    })
+                    AddCorner(Box, UDim.new(0, 3))
+
+                    local Tick = Create("TextLabel", {
+                        Parent             = Box,
+                        Size               = UDim2.new(1, 0, 1, 0),
+                        BackgroundTransparency = 1,
+                        Text               = selected[option] and "✓" or "",
+                        TextColor3         = Aurora.Config.Theme.Text,
+                        Font               = Aurora.Config.FontBold,
+                        TextSize           = 11,
+                    })
+
+                    local OptionLabel = Create("TextLabel", {
+                        Name               = "OptionLabel",
+                        Parent             = row,
+                        Position           = UDim2.new(0, 32, 0, 0),
+                        Size               = UDim2.new(1, -40, 1, 0),
+                        BackgroundTransparency = 1,
+                        Text               = option,
+                        TextColor3         = selected[option] and Aurora.Config.Theme.Text or Aurora.Config.Theme.TextMuted,
+                        Font               = Aurora.Config.FontMedium,
+                        TextSize           = 13,
+                        TextXAlignment     = Enum.TextXAlignment.Left,
+                    })
+
+                    local RowBtn = Create("TextButton", {
+                        Parent             = row,
+                        Size               = UDim2.new(1, 0, 1, 0),
+                        BackgroundTransparency = 1,
+                        Text               = "",
+                    })
+                    RowBtn.MouseEnter:Connect(function()
+                        Tween(row, {BackgroundColor3 = Aurora.Config.Theme.Background}, 0.15)
+                    end)
+                    RowBtn.MouseLeave:Connect(function()
+                        Tween(row, {BackgroundColor3 = Aurora.Config.Theme.Surface}, 0.15)
+                    end)
+                    RowBtn.MouseButton1Click:Connect(function()
+                        selected[option] = not selected[option]
+                        local on = selected[option]
+                        Tween(Box,         {BackgroundColor3 = on and Aurora.Config.Theme.Primary or Aurora.Config.Theme.Border}, 0.15)
+                        Tween(OptionLabel, {TextColor3 = on and Aurora.Config.Theme.Text or Aurora.Config.Theme.TextMuted}, 0.15)
+                        Tick.Text  = on and "✓" or ""
+                        Label.Text = HeaderText()
+                        local vals = SelectedList()
+                        if cfg.Callback then cfg.Callback(vals) end
+                        OnChanged:Fire(vals)
+                    end)
+
+                    rowObjects[i] = row
+                end
+            end
+
+            BuildOptions()
+
+            Create("TextButton", {
+                Parent             = MultiFrame,
+                Size               = UDim2.new(1, 0, 0, L.ELEM_H_SM),
+                BackgroundTransparency = 1,
+                Text               = "",
+            }).MouseButton1Click:Connect(function()
+                expanded = not expanded
+                Tween(MultiFrame, {Size = UDim2.new(1, 0, 0, expanded and L.ELEM_H_SM + #options * ROW_H or L.ELEM_H_SM)}, 0.2)
+                Tween(Arrow, {Rotation = expanded and 180 or 0}, 0.2)
+            end)
+
+            return RegisterElement({
+                Frame      = MultiFrame,
+                OnChanged  = OnChanged,
+                GetValue   = function() return SelectedList() end,
+                IsSelected = function(opt) return selected[opt] == true end,
+                SetValue   = function(vals)
+                    selected = {}
+                    for _, v in ipairs(vals) do selected[v] = true end
+                    Label.Text = HeaderText()
+                    for i, row in ipairs(rowObjects) do
+                        local opt = options[i]
+                        local on  = selected[opt] or false
+                        local box  = row:FindFirstChildWhichIsA("Frame")
+                        local tick = box and box:FindFirstChildWhichIsA("TextLabel")
+                        local lbl  = row:FindFirstChild("OptionLabel")
+                        if box  then box.BackgroundColor3 = on and Aurora.Config.Theme.Primary or Aurora.Config.Theme.Border end
+                        if tick then tick.Text = on and "✓" or "" end
+                        if lbl  then lbl.TextColor3 = on and Aurora.Config.Theme.Text or Aurora.Config.Theme.TextMuted end
+                    end
+                end,
+                -- [API] Replace options at runtime.
+                SetOptions = function(newOptions)
+                    options  = newOptions
+                    selected = {}
+                    Label.Text = HeaderText()
+                    expanded = false
+                    Tween(MultiFrame, {Size = UDim2.new(1, 0, 0, L.ELEM_H_SM)}, 0.15)
+                    Tween(Arrow, {Rotation = 0}, 0.15)
+                    BuildOptions()
+                end,
+            }, MultiFrame)
         end
+
+        -- ── Input ─────────────────────────────
 
         function Tab:CreateInput(cfg)
-            local el, frame = Builders.Input(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame, cfg)
+            cfg = cfg or {}
+            local OnChanged = Signal.new()
+            local frame     = BaseFrame(L.ELEM_H_IN)
+
+            Create("TextLabel", {
+                Parent             = frame,
+                Position           = UDim2.new(0, L.ELEM_PAD_X, 0, 6),
+                Size               = UDim2.new(1, -24, 0, 16),
+                BackgroundTransparency = 1,
+                Text               = cfg.Text or "Input",
+                TextColor3         = Aurora.Config.Theme.TextMuted,
+                Font               = Aurora.Config.FontMedium,
+                TextSize           = 12,
+                TextXAlignment     = Enum.TextXAlignment.Left,
+            })
+
+            local InputBox = Create("TextBox", {
+                Parent             = frame,
+                Position           = UDim2.new(0, 10, 0, 26),
+                Size               = UDim2.new(1, -20, 0, 22),
+                BackgroundColor3   = Aurora.Config.Theme.Surface,
+                BorderSizePixel    = 0,
+                Text               = "",
+                PlaceholderText    = cfg.Placeholder or "Type here...",
+                PlaceholderColor3  = Aurora.Config.Theme.TextMuted,
+                TextColor3         = Aurora.Config.Theme.Text,
+                Font               = Aurora.Config.Font,
+                TextSize           = 13,
+                ClearTextOnFocus   = false,
+                TextXAlignment     = Enum.TextXAlignment.Left,
+            })
+            AddCorner(InputBox, L.ELEM_CORNER)
+            Create("UIPadding", {Parent = InputBox, PaddingLeft = UDim.new(0, 8)})
+
+            local FOCUS_BG = Color3.fromRGB(32, 32, 42)
+            InputBox.Focused:Connect(function()
+                Tween(InputBox, {BackgroundColor3 = FOCUS_BG}, 0.15)
+            end)
+            InputBox.FocusLost:Connect(function(enter)
+                Tween(InputBox, {BackgroundColor3 = Aurora.Config.Theme.Surface}, 0.15)
+                if enter then
+                    if cfg.Callback then cfg.Callback(InputBox.Text) end
+                    OnChanged:Fire(InputBox.Text)
+                end
+            end)
+
+            return RegisterElement({
+                Frame     = frame,
+                OnChanged = OnChanged,
+                GetValue  = function() return InputBox.Text end,
+                SetValue  = function(val) InputBox.Text = val end,
+            }, frame)
         end
+
+        -- ── NumberInput ───────────────────────
 
         function Tab:CreateNumberInput(cfg)
-            local el, frame = Builders.NumberInput(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame, cfg)
+            cfg = cfg or {}
+            local min     = cfg.Min     or -math.huge
+            local max     = cfg.Max     or math.huge
+            local step    = cfg.Step    or 1
+            local current = math.clamp(cfg.Default or 0, min, max)
+            local OnChanged = Signal.new()
+            local frame   = BaseFrame(L.ELEM_H_IN)
+
+            Create("TextLabel", {
+                Parent             = frame,
+                Position           = UDim2.new(0, L.ELEM_PAD_X, 0, 6),
+                Size               = UDim2.new(1, -24, 0, 16),
+                BackgroundTransparency = 1,
+                Text               = cfg.Text or "Number",
+                TextColor3         = Aurora.Config.Theme.TextMuted,
+                Font               = Aurora.Config.FontMedium,
+                TextSize           = 12,
+                TextXAlignment     = Enum.TextXAlignment.Left,
+            })
+
+            local Row = Create("Frame", {
+                Parent           = frame,
+                Position         = UDim2.new(0, 10, 0, 26),
+                Size             = UDim2.new(1, -20, 0, 22),
+                BackgroundTransparency = 1,
+                BorderSizePixel  = 0,
+            })
+
+            local STEP_BTN_W = 26
+            local function MakeStepBtn(xAlign, symbol)
+                local btn = Create("TextButton", {
+                    Parent           = Row,
+                    AnchorPoint      = Vector2.new(xAlign, 0),
+                    Position         = UDim2.new(xAlign, 0, 0, 0),
+                    Size             = UDim2.new(0, STEP_BTN_W, 1, 0),
+                    BackgroundColor3 = Aurora.Config.Theme.Surface,
+                    Text             = symbol,
+                    TextColor3       = Aurora.Config.Theme.Primary,
+                    Font             = Aurora.Config.FontBold,
+                    TextSize         = 16,
+                    AutoButtonColor  = false,
+                    BorderSizePixel  = 0,
+                })
+                AddCorner(btn, L.ELEM_CORNER)
+                btn.MouseEnter:Connect(function()
+                    Tween(btn, {BackgroundColor3 = Aurora.Config.Theme.Primary, TextColor3 = Aurora.Config.Theme.Text}, 0.15)
+                end)
+                btn.MouseLeave:Connect(function()
+                    Tween(btn, {BackgroundColor3 = Aurora.Config.Theme.Surface, TextColor3 = Aurora.Config.Theme.Primary}, 0.15)
+                end)
+                return btn
+            end
+
+            local MinusBtn = MakeStepBtn(0, "−")
+            local PlusBtn  = MakeStepBtn(1, "+")
+
+            local NumBox = Create("TextBox", {
+                Parent             = Row,
+                Position           = UDim2.new(0, STEP_BTN_W + 4, 0, 0),
+                Size               = UDim2.new(1, -(STEP_BTN_W * 2 + 8), 1, 0),
+                BackgroundColor3   = Aurora.Config.Theme.Surface,
+                BorderSizePixel    = 0,
+                Text               = tostring(current),
+                TextColor3         = Aurora.Config.Theme.Text,
+                Font               = Aurora.Config.FontBold,
+                TextSize           = 13,
+                ClearTextOnFocus   = false,
+                TextXAlignment     = Enum.TextXAlignment.Center,
+            })
+            AddCorner(NumBox, L.ELEM_CORNER)
+
+            local function Commit(val)
+                val = math.clamp(math.floor(val / step + 0.5) * step, min, max)
+                NumBox.Text = tostring(val)
+                if val == current then return end
+                current = val
+                if cfg.Callback then cfg.Callback(val) end
+                OnChanged:Fire(val)
+            end
+
+            MinusBtn.MouseButton1Click:Connect(function() Commit(current - step) end)
+            PlusBtn.MouseButton1Click:Connect(function()  Commit(current + step) end)
+            NumBox.FocusLost:Connect(function()
+                local n = tonumber(NumBox.Text)
+                if n then Commit(n) else NumBox.Text = tostring(current) end
+            end)
+
+            return RegisterElement({
+                Frame     = frame,
+                OnChanged = OnChanged,
+                GetValue  = function() return current end,
+                SetValue  = function(val) Commit(val) end,
+            }, frame)
         end
+
+        -- ── Keybind ───────────────────────────
 
         function Tab:CreateKeybind(cfg)
-            local el, frame = Builders.Keybind(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame, cfg)
+            cfg = cfg or {}
+            local current   = cfg.Default or Enum.KeyCode.Unknown
+            local listening = false
+            local OnChanged = Signal.new()
+            local frame     = BaseFrame(L.ELEM_H_SM)
+
+            Create("TextLabel", {
+                Parent             = frame,
+                Position           = UDim2.new(0, L.ELEM_PAD_X, 0, 0),
+                Size               = UDim2.new(1, L.KEYBIND_BTN_X - 10, 1, 0),
+                BackgroundTransparency = 1,
+                Text               = cfg.Text or "Keybind",
+                TextColor3         = Aurora.Config.Theme.Text,
+                Font               = Aurora.Config.FontMedium,
+                TextSize           = 14,
+                TextXAlignment     = Enum.TextXAlignment.Left,
+            })
+
+            local KeyBtn = Create("TextButton", {
+                Parent           = frame,
+                Position         = UDim2.new(1, L.KEYBIND_BTN_X, 0.5, -L.KEYBIND_BTN_H / 2),
+                Size             = UDim2.new(0, L.KEYBIND_BTN_W, 0, L.KEYBIND_BTN_H),
+                BackgroundColor3 = Aurora.Config.Theme.Surface,
+                Text             = current == Enum.KeyCode.Unknown and "None" or current.Name,
+                TextColor3       = Aurora.Config.Theme.Primary,
+                Font             = Aurora.Config.FontBold,
+                TextSize         = 12,
+                AutoButtonColor  = false,
+                BorderSizePixel  = 0,
+            })
+            AddCorner(KeyBtn, L.ELEM_CORNER)
+
+            local keyCon
+            local cancelCon
+
+            local function StopListening(revertText)
+                if not listening then return end
+                listening = false
+                KeyBtn.BackgroundColor3 = Aurora.Config.Theme.Surface
+                KeyBtn.TextColor3       = Aurora.Config.Theme.Primary
+                if revertText then
+                    KeyBtn.Text = current == Enum.KeyCode.Unknown and "None" or current.Name
+                end
+                if keyCon    then keyCon:Disconnect();    keyCon    = nil end
+                if cancelCon then cancelCon:Disconnect(); cancelCon = nil end
+            end
+
+            local function StartListening()
+                if listening then StopListening(true); return end
+                listening = true
+                KeyBtn.Text             = "..."
+                KeyBtn.BackgroundColor3 = Aurora.Config.Theme.Primary
+                KeyBtn.TextColor3       = Aurora.Config.Theme.Text
+
+                -- [FIX] cancelCon is created AFTER keyCon so a MouseButton1
+                --       click that starts listening can't immediately cancel it
+                --       within the same frame.
+                keyCon = UserInputService.InputBegan:Connect(function(inp, processed)
+                    if processed then return end
+                    if inp.UserInputType == Enum.UserInputType.Keyboard then
+                        current     = inp.KeyCode
+                        KeyBtn.Text = inp.KeyCode.Name
+                        if cfg.Callback then cfg.Callback(current) end
+                        OnChanged:Fire(current)
+                        StopListening(false)
+                    end
+                end)
+
+                task.defer(function()
+                    if not listening then return end
+                    cancelCon = UserInputService.InputBegan:Connect(function(inp)
+                        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+                            StopListening(true)
+                        end
+                    end)
+                    table.insert(windowConnections, cancelCon)
+                end)
+            end
+
+            KeyBtn.MouseButton1Click:Connect(StartListening)
+
+            return RegisterElement({
+                Frame     = frame,
+                OnChanged = OnChanged,
+                GetValue  = function() return current end,
+                SetValue  = function(key)
+                    current     = key
+                    KeyBtn.Text = key == Enum.KeyCode.Unknown and "None" or key.Name
+                end,
+            }, frame)
         end
+
+        -- ── ColorPicker ───────────────────────
+        --
+        --  Structure (top → bottom inside Panel):
+        --    ┌─────────────────────┬────┐
+        --    │   SV Pad (sat/val)  │ Hue│  ← CP_SV_H tall
+        --    └─────────────────────┴────┘
+        --    [ Hex input                ]  ← CP_HEX_H tall
+        --    [ Alpha bar (optional)     ]  ← CP_ALPHA_H tall
+        --
+        --  [FIX]  Drag connections are created on drag-start, destroyed on drag-end.
+        --  [FIX]  HexInput resets on blur even if Enter was not pressed.
+        --  [API]  cfg.Alpha = true adds an opacity/alpha slider.
 
         function Tab:CreateColorPicker(cfg)
-            local el, frame = Builders.ColorPicker(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame, cfg)
+            cfg = cfg or {}
+            local hasAlpha  = cfg.Alpha == true
+            local color     = cfg.Default or Color3.fromRGB(255, 255, 255)
+            local alpha     = cfg.DefaultAlpha or 1   -- [API] 0-1 opacity
+            local expanded  = false
+            local OnChanged = Signal.new()
+            local h, s, v   = Color3.toHSV(color)
+
+            local EXPANDED_H = CP_ExpandedH(hasAlpha)
+            local PANEL_X    = 8
+            local PANEL_W    = -(PANEL_X * 2)           -- negative, relative to parent
+            local SV_W       = -(L.CP_HUE_W + 6)        -- negative, leaves room for hue bar
+
+            local PickerFrame = Create("Frame", {
+                Parent           = TabContent,
+                Size             = UDim2.new(1, 0, 0, L.CP_HEADER_H),
+                BackgroundColor3 = Aurora.Config.Theme.Background,
+                BorderSizePixel  = 0,
+                ClipsDescendants = true,
+            })
+            AddCorner(PickerFrame, L.ELEM_CORNER)
+
+            -- ── Header ───────────────────────────
+            Create("TextLabel", {
+                Parent             = PickerFrame,
+                Position           = UDim2.new(0, L.ELEM_PAD_X, 0, 0),
+                Size               = UDim2.new(1, -56, 0, L.CP_HEADER_H),
+                BackgroundTransparency = 1,
+                Text               = cfg.Text or "Color",
+                TextColor3         = Aurora.Config.Theme.Text,
+                Font               = Aurora.Config.FontMedium,
+                TextSize           = 14,
+                TextXAlignment     = Enum.TextXAlignment.Left,
+            })
+
+            local Preview = Create("Frame", {
+                Parent           = PickerFrame,
+                Position         = UDim2.new(1, L.CP_PREVIEW_X, 0.5, -L.CP_PREVIEW_H / 2),
+                Size             = UDim2.new(0, L.CP_PREVIEW_W, 0, L.CP_PREVIEW_H),
+                BackgroundColor3 = color,
+                BorderSizePixel  = 0,
+            })
+            AddCorner(Preview, L.ELEM_CORNER)
+
+            Create("TextButton", {
+                Parent             = PickerFrame,
+                Size               = UDim2.new(1, 0, 0, L.CP_HEADER_H),
+                BackgroundTransparency = 1,
+                Text               = "",
+                ZIndex             = 10,
+            }).MouseButton1Click:Connect(function()
+                expanded = not expanded
+                Tween(PickerFrame, {Size = UDim2.new(1, 0, 0, expanded and EXPANDED_H or L.CP_HEADER_H)}, 0.25)
+            end)
+
+            -- ── Panel container ──────────────────
+            local PANEL_Y = L.CP_HEADER_H + L.CP_GAP
+            local Panel = Create("Frame", {
+                Parent             = PickerFrame,
+                Position           = UDim2.new(0, PANEL_X, 0, PANEL_Y),
+                Size               = UDim2.new(1, PANEL_W, 0, EXPANDED_H - PANEL_Y),
+                BackgroundTransparency = 1,
+                BorderSizePixel    = 0,
+            })
+
+            -- ── SV Pad ───────────────────────────
+            local SVPad = Create("Frame", {
+                Parent           = Panel,
+                Position         = UDim2.new(0, 0, 0, 0),
+                Size             = UDim2.new(1, SV_W, 0, L.CP_SV_H),
+                BackgroundColor3 = Color3.fromHSV(h, 1, 1),
+                BorderSizePixel  = 0,
+                ClipsDescendants = true,
+                ZIndex           = 2,
+            })
+            AddCorner(SVPad, L.ELEM_CORNER)
+
+            -- White overlay (controls Saturation)
+            local WLayer = Create("Frame", {
+                Parent = SVPad, Size = UDim2.new(1, 0, 1, 0),
+                BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 3,
+            })
+            Create("UIGradient", {
+                Parent = WLayer,
+                Transparency = NumberSequence.new({
+                    NumberSequenceKeypoint.new(0, 0),
+                    NumberSequenceKeypoint.new(1, 1),
+                }),
+            })
+
+            -- Black overlay (controls Value)
+            local BLayer = Create("Frame", {
+                Parent = SVPad, Size = UDim2.new(1, 0, 1, 0),
+                BackgroundColor3 = Color3.new(0, 0, 0), BorderSizePixel = 0, ZIndex = 4,
+            })
+            Create("UIGradient", {
+                Parent = BLayer,
+                Transparency = NumberSequence.new({
+                    NumberSequenceKeypoint.new(0, 1),
+                    NumberSequenceKeypoint.new(1, 0),
+                }),
+                Rotation = 90,
+            })
+
+            local SVDrag = Create("TextButton", {
+                Parent = SVPad, Size = UDim2.new(1, 0, 1, 0),
+                BackgroundTransparency = 1, Text = "", ZIndex = 6,
+            })
+
+            local SVCursor = Create("Frame", {
+                Parent = SVPad,
+                Size             = UDim2.new(0, 10, 0, 10),
+                AnchorPoint      = Vector2.new(0.5, 0.5),
+                Position         = UDim2.new(s, 0, 1 - v, 0),
+                BackgroundColor3 = Color3.new(1, 1, 1),
+                BorderSizePixel  = 0, ZIndex = 7,
+            })
+            AddCorner(SVCursor, UDim.new(1, 0))
+
+            -- ── Hue Bar ──────────────────────────
+            local HueBar = Create("Frame", {
+                Parent           = Panel,
+                Position         = UDim2.new(1, -(L.CP_HUE_W), 0, 0),
+                Size             = UDim2.new(0, L.CP_HUE_W, 0, L.CP_SV_H),
+                BackgroundColor3 = Color3.new(1, 1, 1),
+                BorderSizePixel  = 0, ClipsDescendants = true, ZIndex = 2,
+            })
+            AddCorner(HueBar, L.ELEM_CORNER)
+
+            Create("UIGradient", {
+                Parent = HueBar,
+                Color  = ColorSequence.new({
+                    ColorSequenceKeypoint.new(0/6, Color3.fromHSV(0/6, 1, 1)),
+                    ColorSequenceKeypoint.new(1/6, Color3.fromHSV(1/6, 1, 1)),
+                    ColorSequenceKeypoint.new(2/6, Color3.fromHSV(2/6, 1, 1)),
+                    ColorSequenceKeypoint.new(3/6, Color3.fromHSV(3/6, 1, 1)),
+                    ColorSequenceKeypoint.new(4/6, Color3.fromHSV(4/6, 1, 1)),
+                    ColorSequenceKeypoint.new(5/6, Color3.fromHSV(5/6, 1, 1)),
+                    ColorSequenceKeypoint.new(1,   Color3.fromHSV(0,   1, 1)),
+                }),
+                Rotation = 90,
+            })
+
+            local HueDrag = Create("TextButton", {
+                Parent = HueBar, Size = UDim2.new(1, 0, 1, 0),
+                BackgroundTransparency = 1, Text = "", ZIndex = 3,
+            })
+
+            local HueCursor = Create("Frame", {
+                Parent = HueBar,
+                Size             = UDim2.new(1, 0, 0, 4),
+                AnchorPoint      = Vector2.new(0, 0.5),
+                Position         = UDim2.new(0, 0, h, 0),
+                BackgroundColor3 = Color3.new(1, 1, 1),
+                BorderSizePixel  = 0, ZIndex = 4,
+            })
+            AddCorner(HueCursor, UDim.new(1, 0))
+
+            -- ── Hex Input ────────────────────────
+            local HEX_Y = L.CP_SV_H + L.CP_GAP
+            local HexInput = Create("TextBox", {
+                Parent             = Panel,
+                Position           = UDim2.new(0, 0, 0, HEX_Y),
+                Size               = UDim2.new(1, 0, 0, L.CP_HEX_H),
+                BackgroundColor3   = Aurora.Config.Theme.Surface,
+                BorderSizePixel    = 0,
+                Text               = string.format("#%02X%02X%02X",
+                    math.round(color.R * 255),
+                    math.round(color.G * 255),
+                    math.round(color.B * 255)),
+                TextColor3         = Aurora.Config.Theme.Text,
+                Font               = Aurora.Config.Font,
+                TextSize           = 12,
+                ClearTextOnFocus   = false,
+                ZIndex             = 2,
+            })
+            AddCorner(HexInput, L.ELEM_CORNER)
+            Create("UIPadding", {Parent = HexInput, PaddingLeft = UDim.new(0, 8)})
+
+            -- ── Alpha Bar (optional) ─────────────
+            local AlphaFill
+            local AlphaKnob
+            local AlphaLabel
+
+            if hasAlpha then
+                local ALPHA_Y    = HEX_Y + L.CP_HEX_H + L.CP_GAP
+                local ALPHA_H    = L.CP_ALPHA_H
+                local HALF_KNOB  = L.SLIDER_KNOB / 2
+
+                Create("TextLabel", {
+                    Parent             = Panel,
+                    Position           = UDim2.new(0, 0, 0, ALPHA_Y - 14),
+                    Size               = UDim2.new(0.5, 0, 0, 12),
+                    BackgroundTransparency = 1,
+                    Text               = "Opacity",
+                    TextColor3         = Aurora.Config.Theme.TextMuted,
+                    Font               = Aurora.Config.Font,
+                    TextSize           = 10,
+                    TextXAlignment     = Enum.TextXAlignment.Left,
+                    ZIndex             = 2,
+                })
+
+                AlphaLabel = Create("TextLabel", {
+                    Parent             = Panel,
+                    Position           = UDim2.new(0.5, 0, 0, ALPHA_Y - 14),
+                    Size               = UDim2.new(0.5, 0, 0, 12),
+                    BackgroundTransparency = 1,
+                    Text               = math.floor(alpha * 100) .. "%",
+                    TextColor3         = Aurora.Config.Theme.Primary,
+                    Font               = Aurora.Config.FontBold,
+                    TextSize           = 10,
+                    TextXAlignment     = Enum.TextXAlignment.Right,
+                    ZIndex             = 2,
+                })
+
+                local AlphaBar = Create("Frame", {
+                    Parent           = Panel,
+                    Position         = UDim2.new(0, 0, 0, ALPHA_Y),
+                    Size             = UDim2.new(1, 0, 0, ALPHA_H),
+                    BackgroundColor3 = Aurora.Config.Theme.Border,
+                    BorderSizePixel  = 0, ZIndex = 2,
+                })
+                AddCorner(AlphaBar, UDim.new(1, 0))
+
+                AlphaFill = Create("Frame", {
+                    Parent = AlphaBar,
+                    Size             = UDim2.new(alpha, 0, 1, 0),
+                    BackgroundColor3 = Aurora.Config.Theme.Primary,
+                    BorderSizePixel  = 0,
+                })
+                AddCorner(AlphaFill, UDim.new(1, 0))
+
+                AlphaKnob = Create("Frame", {
+                    Parent = AlphaBar,
+                    Position         = UDim2.new(alpha, -HALF_KNOB, 0.5, -HALF_KNOB),
+                    Size             = UDim2.new(0, L.SLIDER_KNOB, 0, L.SLIDER_KNOB),
+                    BackgroundColor3 = Color3.new(1, 1, 1),
+                    BorderSizePixel  = 0, ZIndex = 3,
+                })
+                AddCorner(AlphaKnob, UDim.new(1, 0))
+
+                -- Alpha drag — same on-demand connection pattern as Slider
+                local alphaMove, alphaEnd
+
+                local function StopAlpha()
+                    if alphaMove then alphaMove:Disconnect(); alphaMove = nil end
+                    if alphaEnd  then alphaEnd:Disconnect();  alphaEnd  = nil end
+                end
+
+                AlphaBar.InputBegan:Connect(function(inp)
+                    if inp.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+                    local function applyA(x)
+                        alpha = math.clamp((x - AlphaBar.AbsolutePosition.X) / AlphaBar.AbsoluteSize.X, 0, 1)
+                        AlphaFill.Size      = UDim2.new(alpha, 0, 1, 0)
+                        AlphaKnob.Position  = UDim2.new(alpha, -HALF_KNOB, 0.5, -HALF_KNOB)
+                        AlphaLabel.Text     = math.floor(alpha * 100) .. "%"
+                    end
+                    applyA(inp.Position.X)
+                    alphaMove = UserInputService.InputChanged:Connect(function(mi)
+                        if mi.UserInputType == Enum.UserInputType.MouseMovement then applyA(mi.Position.X) end
+                    end)
+                    alphaEnd = UserInputService.InputEnded:Connect(function(ei)
+                        if ei.UserInputType == Enum.UserInputType.MouseButton1 then StopAlpha() end
+                    end)
+                end)
+            end
+
+            -- ── Commit ───────────────────────────
+            local function Commit()
+                color = Color3.fromHSV(h, s, v)
+                Preview.BackgroundColor3 = color
+                SVPad.BackgroundColor3   = Color3.fromHSV(h, 1, 1)
+                SVCursor.Position        = UDim2.new(s, 0, 1 - v, 0)
+                HueCursor.Position       = UDim2.new(0, 0, h, 0)
+                HexInput.Text = string.format("#%02X%02X%02X",
+                    math.round(color.R * 255),
+                    math.round(color.G * 255),
+                    math.round(color.B * 255))
+                if cfg.Callback then cfg.Callback(color, hasAlpha and alpha or nil) end
+                OnChanged:Fire(color, hasAlpha and alpha or nil)
+            end
+
+            -- ── SV drag (on-demand connections) ──
+            local svMove, svEnd
+
+            local function StopSV()
+                if svMove then svMove:Disconnect(); svMove = nil end
+                if svEnd  then svEnd:Disconnect();  svEnd  = nil end
+            end
+
+            SVDrag.InputBegan:Connect(function(inp)
+                if inp.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+                s = math.clamp((inp.Position.X - SVPad.AbsolutePosition.X) / SVPad.AbsoluteSize.X, 0, 1)
+                v = 1 - math.clamp((inp.Position.Y - SVPad.AbsolutePosition.Y) / SVPad.AbsoluteSize.Y, 0, 1)
+                Commit()
+                svMove = UserInputService.InputChanged:Connect(function(mi)
+                    if mi.UserInputType == Enum.UserInputType.MouseMovement then
+                        s = math.clamp((mi.Position.X - SVPad.AbsolutePosition.X) / SVPad.AbsoluteSize.X, 0, 1)
+                        v = 1 - math.clamp((mi.Position.Y - SVPad.AbsolutePosition.Y) / SVPad.AbsoluteSize.Y, 0, 1)
+                        Commit()
+                    end
+                end)
+                svEnd = UserInputService.InputEnded:Connect(function(ei)
+                    if ei.UserInputType == Enum.UserInputType.MouseButton1 then StopSV() end
+                end)
+            end)
+
+            -- ── Hue drag (on-demand connections) ─
+            local hueMove, hueEnd
+
+            local function StopHue()
+                if hueMove then hueMove:Disconnect(); hueMove = nil end
+                if hueEnd  then hueEnd:Disconnect();  hueEnd  = nil end
+            end
+
+            HueDrag.InputBegan:Connect(function(inp)
+                if inp.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+                h = math.clamp((inp.Position.Y - HueBar.AbsolutePosition.Y) / HueBar.AbsoluteSize.Y, 0, 1)
+                Commit()
+                hueMove = UserInputService.InputChanged:Connect(function(mi)
+                    if mi.UserInputType == Enum.UserInputType.MouseMovement then
+                        h = math.clamp((mi.Position.Y - HueBar.AbsolutePosition.Y) / HueBar.AbsoluteSize.Y, 0, 1)
+                        Commit()
+                    end
+                end)
+                hueEnd = UserInputService.InputEnded:Connect(function(ei)
+                    if ei.UserInputType == Enum.UserInputType.MouseButton1 then StopHue() end
+                end)
+            end)
+
+            -- ── Hex input ────────────────────────
+            -- [FIX] Always reset to current color hex on blur, not only on Enter.
+            HexInput.FocusLost:Connect(function(enter)
+                local hex = HexInput.Text:gsub("#", "")
+                if #hex == 6 and enter then
+                    local r = tonumber(hex:sub(1, 2), 16)
+                    local g = tonumber(hex:sub(3, 4), 16)
+                    local b = tonumber(hex:sub(5, 6), 16)
+                    if r and g and b then
+                        color  = Color3.fromRGB(r, g, b)
+                        h, s, v = Color3.toHSV(color)
+                        Commit()
+                        return
+                    end
+                end
+                -- Invalid input or blur-without-enter: reset display to current
+                HexInput.Text = string.format("#%02X%02X%02X",
+                    math.round(color.R * 255),
+                    math.round(color.G * 255),
+                    math.round(color.B * 255))
+            end)
+
+            return RegisterElement({
+                Frame     = PickerFrame,
+                OnChanged = OnChanged,
+                GetValue  = function() return color end,
+                GetAlpha  = function() return alpha end,
+                SetValue  = function(c, a)
+                    color   = c
+                    h, s, v = Color3.toHSV(c)
+                    if hasAlpha and a ~= nil then
+                        alpha = math.clamp(a, 0, 1)
+                        if AlphaFill  then AlphaFill.Size      = UDim2.new(alpha, 0, 1, 0) end
+                        if AlphaKnob  then AlphaKnob.Position  = UDim2.new(alpha, -L.SLIDER_KNOB / 2, 0.5, -L.SLIDER_KNOB / 2) end
+                        if AlphaLabel then AlphaLabel.Text      = math.floor(alpha * 100) .. "%" end
+                    end
+                    Commit()
+                end,
+            }, PickerFrame)
         end
+
+        -- ── Label ─────────────────────────────
 
         function Tab:CreateLabel(text)
-            local el, frame = Builders.Label(TabContent, text)
-            return RegisterElement(Tab, EmptyState, el, frame, {})
+            local frame = Create("Frame", {
+                Parent             = TabContent,
+                Size               = UDim2.new(1, 0, 0, 22),
+                BackgroundTransparency = 1,
+            })
+            local lbl = Create("TextLabel", {
+                Parent             = frame,
+                Size               = UDim2.new(1, 0, 1, 0),
+                BackgroundTransparency = 1,
+                Text               = text or "Label",
+                TextColor3         = Aurora.Config.Theme.TextMuted,
+                Font               = Aurora.Config.Font,
+                TextSize           = 12,
+                TextXAlignment     = Enum.TextXAlignment.Left,
+            })
+            return RegisterElement({
+                Frame   = frame,
+                SetText = function(t) lbl.Text = t end,
+            }, frame)
         end
+
+        -- ── Section ───────────────────────────
 
         function Tab:CreateSection(sectionText)
-            local el, frame = Builders.Section(TabContent, sectionText)
-            return RegisterElement(Tab, EmptyState, el, frame, {})
+            local frame = Create("Frame", {
+                Parent             = TabContent,
+                Size               = UDim2.new(1, 0, 0, 28),
+                BackgroundTransparency = 1,
+            })
+            Create("TextLabel", {
+                Parent             = frame,
+                Size               = UDim2.new(1, 0, 1, -1),
+                BackgroundTransparency = 1,
+                Text               = (sectionText or "Section"):upper(),
+                TextColor3         = Aurora.Config.Theme.Primary,
+                Font               = Aurora.Config.FontBold,
+                TextSize           = 11,
+                TextXAlignment     = Enum.TextXAlignment.Left,
+            })
+            Create("Frame", {
+                Parent           = frame,
+                Position         = UDim2.new(0, 0, 1, -1),
+                Size             = UDim2.new(1, 0, 0, 1),
+                BackgroundColor3 = Aurora.Config.Theme.Border,
+                BorderSizePixel  = 0,
+            })
+            return RegisterElement({Frame = frame}, frame)
         end
+
+        -- ── Table ─────────────────────────────
 
         function Tab:CreateTable(cfg)
-            local el, frame = Builders.Table(TabContent, cfg)
-            return RegisterElement(Tab, EmptyState, el, frame, cfg)
+            cfg = cfg or {}
+            local columns       = cfg.Columns    or {"Column 1", "Column 2"}
+            local rows          = cfg.Rows        or {}
+            local rowH          = 28
+            local headerH       = 28
+            local maxRows       = cfg.MaxVisible  or 6
+            local OnRowClicked  = Signal.new()
+            local numCols       = #columns
+            local colW          = 1 / numCols
+
+            local TableFrame = Create("Frame", {
+                Parent           = TabContent,
+                Size             = UDim2.new(1, 0, 0, headerH + math.min(#rows, maxRows) * rowH),
+                BackgroundColor3 = Aurora.Config.Theme.Background,
+                BorderSizePixel  = 0,
+                ClipsDescendants = false,
+            })
+            AddCorner(TableFrame, L.ELEM_CORNER)
+
+            local Header = Create("Frame", {
+                Parent           = TableFrame,
+                Size             = UDim2.new(1, 0, 0, headerH),
+                BackgroundColor3 = Aurora.Config.Theme.Primary,
+                BorderSizePixel  = 0,
+                ClipsDescendants = true,
+            })
+            AddCorner(Header, L.ELEM_CORNER)
+            Create("Frame", {
+                Parent           = Header,
+                Position         = UDim2.new(0, 0, 1, -6),
+                Size             = UDim2.new(1, 0, 0, 6),
+                BackgroundColor3 = Aurora.Config.Theme.Primary,
+                BorderSizePixel  = 0,
+            })
+
+            for i, col in ipairs(columns) do
+                Create("TextLabel", {
+                    Parent             = Header,
+                    Position           = UDim2.new((i-1) * colW, 8, 0, 0),
+                    Size               = UDim2.new(colW, -8, 1, 0),
+                    BackgroundTransparency = 1,
+                    Text               = col,
+                    TextColor3         = Aurora.Config.Theme.Text,
+                    Font               = Aurora.Config.FontBold,
+                    TextSize           = 12,
+                    TextXAlignment     = Enum.TextXAlignment.Left,
+                    TextTruncate       = Enum.TextTruncate.AtEnd,
+                })
+                if i < numCols then
+                    Create("Frame", {
+                        Parent           = Header,
+                        Position         = UDim2.new(i * colW, 0, 0.1, 0),
+                        Size             = UDim2.new(0, 1, 0.8, 0),
+                        BackgroundColor3 = Color3.new(1, 1, 1),
+                        BackgroundTransparency = 0.7,
+                        BorderSizePixel  = 0,
+                    })
+                end
+            end
+
+            local Body = Create("ScrollingFrame", {
+                Parent               = TableFrame,
+                Position             = UDim2.new(0, 0, 0, headerH),
+                Size                 = UDim2.new(1, 0, 1, -headerH),
+                BackgroundColor3     = Aurora.Config.Theme.Background,
+                BorderSizePixel      = 0,
+                ScrollBarThickness   = 2,
+                ScrollBarImageColor3 = Aurora.Config.Theme.Border,
+                AutomaticCanvasSize  = Enum.AutomaticSize.Y,
+                CanvasSize           = UDim2.new(0, 0, 0, 0),
+                ClipsDescendants     = true,
+            })
+            AddCorner(Body, L.ELEM_CORNER)
+            Create("UIListLayout", {Parent = Body, SortOrder = Enum.SortOrder.LayoutOrder})
+
+            local rowObjects = {}
+
+            local function RenderRow(rowData, index)
+                local isEven   = index % 2 == 0
+                local rowFrame = Create("Frame", {
+                    Parent           = Body,
+                    Size             = UDim2.new(1, 0, 0, rowH),
+                    BackgroundColor3 = isEven and Aurora.Config.Theme.Surface or Aurora.Config.Theme.Background,
+                    BorderSizePixel  = 0,
+                    LayoutOrder      = index,
+                })
+                for c, cell in ipairs(rowData) do
+                    Create("TextLabel", {
+                        Parent             = rowFrame,
+                        Position           = UDim2.new((c-1) * colW, 8, 0, 0),
+                        Size               = UDim2.new(colW, -8, 1, 0),
+                        BackgroundTransparency = 1,
+                        Text               = tostring(cell),
+                        TextColor3         = Aurora.Config.Theme.Text,
+                        Font               = Aurora.Config.Font,
+                        TextSize           = 12,
+                        TextXAlignment     = Enum.TextXAlignment.Left,
+                        TextTruncate       = Enum.TextTruncate.AtEnd,
+                    })
+                end
+                local HOVER_ROW = Color3.fromRGB(40, 40, 55)
+                local rowBtn = Create("TextButton", {
+                    Parent             = rowFrame,
+                    Size               = UDim2.new(1, 0, 1, 0),
+                    BackgroundTransparency = 1,
+                    Text               = "",
+                })
+                rowBtn.MouseEnter:Connect(function()
+                    Tween(rowFrame, {BackgroundColor3 = HOVER_ROW}, 0.12)
+                end)
+                rowBtn.MouseLeave:Connect(function()
+                    Tween(rowFrame, {BackgroundColor3 = isEven and Aurora.Config.Theme.Surface or Aurora.Config.Theme.Background}, 0.12)
+                end)
+                rowBtn.MouseButton1Click:Connect(function()
+                    OnRowClicked:Fire(index, rowData)
+                end)
+                return rowFrame
+            end
+
+            for i, rowData in ipairs(rows) do
+                rowObjects[i] = RenderRow(rowData, i)
+            end
+
+            local function Resize()
+                TableFrame.Size = UDim2.new(1, 0, 0, headerH + math.min(#rows, maxRows) * rowH)
+            end
+            Resize()
+
+            local element = {
+                Frame        = TableFrame,
+                OnRowClicked = OnRowClicked,
+
+                SetRows = function(newRows)
+                    rows = newRows
+                    for _, obj in ipairs(rowObjects) do obj:Destroy() end
+                    rowObjects = {}
+                    for i, rowData in ipairs(rows) do
+                        rowObjects[i] = RenderRow(rowData, i)
+                    end
+                    Resize()
+                end,
+
+                AddRow = function(rowData)
+                    table.insert(rows, rowData)
+                    rowObjects[#rows] = RenderRow(rowData, #rows)
+                    Resize()
+                end,
+
+                RemoveRow = function(index)
+                    if not rows[index] then return end
+                    table.remove(rows, index)
+                    for _, obj in ipairs(rowObjects) do obj:Destroy() end
+                    rowObjects = {}
+                    for i, rowData in ipairs(rows) do
+                        rowObjects[i] = RenderRow(rowData, i)
+                    end
+                    Resize()
+                end,
+
+                SetCell = function(rowIndex, colIndex, value)
+                    if not rows[rowIndex] then return end
+                    rows[rowIndex][colIndex] = value
+                    local rowFrame = rowObjects[rowIndex]
+                    if not rowFrame then return end
+                    local labels = {}
+                    for _, c in ipairs(rowFrame:GetChildren()) do
+                        if c:IsA("TextLabel") then table.insert(labels, c) end
+                    end
+                    table.sort(labels, function(a, b)
+                        return a.Position.X.Scale < b.Position.X.Scale
+                    end)
+                    if labels[colIndex] then
+                        labels[colIndex].Text = tostring(value)
+                    end
+                end,
+
+                Clear = function()
+                    rows = {}
+                    for _, obj in ipairs(rowObjects) do obj:Destroy() end
+                    rowObjects = {}
+                    Resize()
+                end,
+
+                GetRows = function() return rows end,
+            }
+
+            return RegisterElement(element, TableFrame)
         end
 
-        -- Auto-select first tab
+        -- ── First-tab auto-activation ──────────
+
         if #Window.Tabs == 0 then
             TabButton.BackgroundColor3 = Aurora.Config.Theme.Primary
             TabLabel.TextColor3        = Aurora.Config.Theme.Text
@@ -2520,9 +2310,8 @@ function Aurora:CreateWindow(config)
 
         table.insert(Window.Tabs, Tab)
         return Tab
-    end
+    end -- CreateTab
 
-    -- Dragging
     local dragConns = MakeDraggable(MainFrame, TitleBar)
     for _, c in ipairs(dragConns) do
         table.insert(windowConnections, c)
@@ -2537,7 +2326,7 @@ function Aurora:CreateWindow(config)
     Tween(MainFrame, {Size = size, Position = position}, 0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 
     return Window
-end
+end -- CreateWindow
 
 -- ─────────────────────────────────────────────
 --  Notification system
@@ -2565,78 +2354,65 @@ function Aurora:Notify(cfg)
     end
 
     local slotIndex = #notifQueue + 1
-    local posY      = -(slotIndex * (K.NOTIF_HEIGHT + K.NOTIF_GAP))
+    local posY      = -(slotIndex * (L.NOTIF_HEIGHT + L.NOTIF_GAP))
 
     local frame = Create("Frame", {
         Parent           = _notifGui,
         Position         = UDim2.new(1, 20, 1, posY),
-        Size             = UDim2.new(0, 280, 0, K.NOTIF_HEIGHT),
+        Size             = UDim2.new(0, L.NOTIF_W, 0, L.NOTIF_HEIGHT),
         BackgroundColor3 = Aurora.Config.Theme.Surface,
         BorderSizePixel  = 0,
     })
     AddCorner(frame)
     AddShadow(frame, 0.8)
 
+    -- Colour accent bar
     local AccentBar = Create("Frame", {
-        Parent           = frame,
-        Size             = UDim2.new(0, 4, 1, 0),
-        BackgroundColor3 = color,
-        BorderSizePixel  = 0,
+        Parent = frame, Size = UDim2.new(0, 4, 1, 0),
+        BackgroundColor3 = color, BorderSizePixel = 0,
     })
     AddCorner(AccentBar, UDim.new(0, 4))
+    -- Square off the right side of the accent bar so it sits flush
     Create("Frame", {
-        Parent           = AccentBar,
-        Position         = UDim2.new(0.5, 0, 0, 0),
-        Size             = UDim2.new(0.5, 0, 1, 0),
-        BackgroundColor3 = color,
-        BorderSizePixel  = 0,
+        Parent = AccentBar,
+        Position = UDim2.new(0.5, 0, 0, 0),
+        Size     = UDim2.new(0.5, 0, 1, 0),
+        BackgroundColor3 = color, BorderSizePixel = 0,
     })
 
     Create("TextLabel", {
-        Parent                 = frame,
-        Position               = UDim2.new(0, 16, 0, 10),
-        Size                   = UDim2.new(1, -32, 0, 20),
-        BackgroundTransparency = 1,
-        Text                   = cfg.Title or "Notification",
-        TextColor3             = Aurora.Config.Theme.Text,
-        Font                   = Aurora.Config.FontBold,
-        TextSize               = 14,
-        TextXAlignment         = Enum.TextXAlignment.Left,
+        Parent = frame, Position = UDim2.new(0, 16, 0, 10),
+        Size = UDim2.new(1, -32, 0, 20), BackgroundTransparency = 1,
+        Text = cfg.Title or "Notification", TextColor3 = Aurora.Config.Theme.Text,
+        Font = Aurora.Config.FontBold, TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left,
     })
     Create("TextLabel", {
-        Parent                 = frame,
-        Position               = UDim2.new(0, 16, 0, 32),
-        Size                   = UDim2.new(1, -32, 0, 36),
-        BackgroundTransparency = 1,
-        Text                   = cfg.Message or "",
-        TextColor3             = Aurora.Config.Theme.TextMuted,
-        Font                   = Aurora.Config.Font,
-        TextSize               = 13,
-        TextXAlignment         = Enum.TextXAlignment.Left,
-        TextWrapped            = true,
+        Parent = frame, Position = UDim2.new(0, 16, 0, 32),
+        Size = UDim2.new(1, -32, 0, 36), BackgroundTransparency = 1,
+        Text = cfg.Message or "", TextColor3 = Aurora.Config.Theme.TextMuted,
+        Font = Aurora.Config.Font, TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true,
     })
 
     local Progress = Create("Frame", {
-        Parent           = frame,
-        Position         = UDim2.new(0, 0, 1, -2),
-        Size             = UDim2.new(1, 0, 0, 2),
-        BackgroundColor3 = color,
-        BorderSizePixel  = 0,
+        Parent = frame, Position = UDim2.new(0, 0, 1, -2),
+        Size = UDim2.new(1, 0, 0, 2),
+        BackgroundColor3 = color, BorderSizePixel = 0,
     })
 
     local entry = {frame = frame}
     table.insert(notifQueue, entry)
 
-    Tween(frame,    {Position = UDim2.new(1, K.NOTIF_X, 1, posY)}, 0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+    Tween(frame,    {Position = UDim2.new(1, L.NOTIF_X, 1, posY)}, 0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
     Tween(Progress, {Size = UDim2.new(0, 0, 0, 2)}, duration, Enum.EasingStyle.Linear)
 
     task.delay(duration, function()
-        -- Slide out before removing from queue so RepositionNotifs sees correct count
         Tween(frame, {Position = UDim2.new(1, 20, 1, posY)}, 0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
         task.wait(0.35)
         frame:Destroy()
         for i, e in ipairs(notifQueue) do
-            if e == entry then table.remove(notifQueue, i) break end
+            if e == entry then table.remove(notifQueue, i); break end
         end
         RepositionNotifs()
     end)
