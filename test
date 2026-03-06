@@ -1,6 +1,6 @@
 --// Aurora UI Library
 --// A minimalistic, beautiful UI library for Roblox
---// Version: 8.0.0
+--// Version: 8.0.1
 --// Added: SaveConfig/LoadConfig (writefile/readfile, JSON, all value types)
 --//        Tooltip support on every element (hover delay, fade-in, auto-position)
 
@@ -795,71 +795,68 @@ function Aurora:CreateWindow(config)
     -- Attaches a hover tooltip to any GuiObject.
     -- The tooltip floats above the element (flips below if too close to top).
     -- A 0.5s hover delay prevents it flashing on fast mouse passes.
-    local tooltipFrame do
-        tooltipFrame = Create("Frame", {
-            Name                   = "_AuroraTooltip",
-            Parent                 = ScreenGui,
-            Size                   = UDim2.new(0, 10, 0, 26),  -- resized by text
-            BackgroundColor3       = Aurora.Config.Theme.Surface,
-            BorderSizePixel        = 0,
-            Visible                = false,
-            ZIndex                 = 200,
-        })
-        AddCorner(tooltipFrame, UDim.new(0, 4))
-        Create("UIStroke", {
-            Parent          = tooltipFrame,
-            Color           = Aurora.Config.Theme.Border,
-            Thickness       = 1,
-            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-        })
-        Create("UIPadding", {
-            Parent       = tooltipFrame,
-            PaddingLeft  = UDim.new(0, 8),
-            PaddingRight = UDim.new(0, 8),
-            PaddingTop   = UDim.new(0, 4),
-            PaddingBottom = UDim.new(0, 4),
-        })
-        local tooltipLabel = Create("TextLabel", {
-            Name                   = "Label",
-            Parent                 = tooltipFrame,
-            Size                   = UDim2.new(1, 0, 1, 0),
-            BackgroundTransparency = 1,
-            Text                   = "",
-            TextColor3             = Aurora.Config.Theme.TextMuted,
-            Font                   = Aurora.Config.Font,
-            TextSize               = 12,
-            TextWrapped            = false,
-            ZIndex                 = 201,
-        })
-        -- Keep a reference on the frame so AttachTooltip can update text
-        tooltipFrame._label = tooltipLabel
-    end
+    -- FIX: keep tooltipLabel as a plain Lua local — Roblox Instances do not
+    --      allow arbitrary keys to be set on them directly.
+    local tooltipFrame = Create("Frame", {
+        Name                   = "_AuroraTooltip",
+        Parent                 = ScreenGui,
+        Size                   = UDim2.new(0, 10, 0, 26),
+        BackgroundColor3       = Aurora.Config.Theme.Surface,
+        BorderSizePixel        = 0,
+        Visible                = false,
+        ZIndex                 = 200,
+    })
+    AddCorner(tooltipFrame, UDim.new(0, 4))
+    Create("UIStroke", {
+        Parent          = tooltipFrame,
+        Color           = Aurora.Config.Theme.Border,
+        Thickness       = 1,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+    })
+    Create("UIPadding", {
+        Parent        = tooltipFrame,
+        PaddingLeft   = UDim.new(0, 8),
+        PaddingRight  = UDim.new(0, 8),
+        PaddingTop    = UDim.new(0, 4),
+        PaddingBottom = UDim.new(0, 4),
+    })
+    -- Plain Lua local — NOT stored on the Instance
+    local tooltipLabel = Create("TextLabel", {
+        Name                   = "Label",
+        Parent                 = tooltipFrame,
+        Size                   = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Text                   = "",
+        TextColor3             = Aurora.Config.Theme.TextMuted,
+        Font                   = Aurora.Config.Font,
+        TextSize               = 12,
+        TextWrapped            = false,
+        ZIndex                 = 201,
+    })
 
     -- Moves the shared tooltip frame near the given GuiObject
     local function PositionTooltip(anchor)
-        local ap  = anchor.AbsolutePosition
-        local as  = anchor.AbsoluteSize
-        local ts  = tooltipFrame.AbsoluteSize
-        local vpY = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize.Y or 800
-        local x   = ap.X
-        local y   = ap.Y - ts.Y - 6          -- default: above the element
+        local ap = anchor.AbsolutePosition
+        local as = anchor.AbsoluteSize
+        local ts = tooltipFrame.AbsoluteSize
+        local x  = ap.X
+        local y  = ap.Y - ts.Y - 6     -- default: above the element
         if y < 4 then
-            y = ap.Y + as.Y + 6              -- flip below if too close to top
+            y = ap.Y + as.Y + 6        -- flip below if too close to top
         end
         tooltipFrame.Position = UDim2.new(0, x, 0, y)
     end
 
     -- Attach a tooltip string to any GuiObject.
     -- Called from RegisterElement when cfg.Tooltip is set.
-    local tooltipThread   -- the pending show-delay coroutine
+    local tooltipThread  -- pending show-delay task handle
     local function AttachTooltip(anchor, text)
         anchor.MouseEnter:Connect(function()
             tooltipThread = task.delay(0.5, function()
-                tooltipFrame._label.Text = text
-                -- Size the frame to fit the text
+                tooltipLabel.Text = text   -- uses the plain Lua local
                 local textSize = game:GetService("TextService"):GetTextSize(
                     text, 12, Aurora.Config.Font, Vector2.new(400, 100))
-                tooltipFrame.Size = UDim2.new(0, textSize.X + 16, 0, textSize.Y + 8)
+                tooltipFrame.Size                  = UDim2.new(0, textSize.X + 16, 0, textSize.Y + 8)
                 PositionTooltip(anchor)
                 tooltipFrame.Visible               = true
                 tooltipFrame.BackgroundTransparency = 1
@@ -873,7 +870,6 @@ function Aurora:CreateWindow(config)
             end
             tooltipFrame.Visible = false
         end)
-        -- Also hide on any mouse click so tooltip doesn't linger after interaction
         anchor.InputBegan:Connect(function(inp)
             if inp.UserInputType == Enum.UserInputType.MouseButton1 then
                 tooltipFrame.Visible = false
