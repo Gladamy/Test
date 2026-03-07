@@ -1,32 +1,12 @@
 --// Aurora UI Library
 --// A minimalistic, beautiful UI library for Roblox
---// Version: 6.3.0 (Touch & Compatibility Patch)
+--// Version: 6.3.0
 
 local Aurora = {}
 local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Players          = game:GetService("Players")
 local LocalPlayer      = Players.LocalPlayer
-
--- ─────────────────────────────────────────────
---  Compatibility Polyfills
---  Ensures support for older executor environments
--- ─────────────────────────────────────────────
-
-if not math.round then
-    math.round = function(x) return math.floor(x + 0.5) end
-end
-
-if not Color3.fromHex then
-    Color3.fromHex = function(hex)
-        hex = hex:gsub("#", "")
-        return Color3.fromRGB(
-            tonumber(hex:sub(1, 2), 16),
-            tonumber(hex:sub(3, 4), 16),
-            tonumber(hex:sub(5, 6), 16)
-        )
-    end
-end
 
 -- ─────────────────────────────────────────────
 --  Configuration
@@ -43,7 +23,7 @@ Aurora.Config = {
         Success    = Color3.fromRGB(46,  204, 113),
         Warning    = Color3.fromRGB(241, 196, 15),
         Error      = Color3.fromRGB(231, 76,  60),
-        Border     = Color3.fromRGB(55,  55,  68),
+        Border     = Color3.fromRGB(55,  55,  68),   -- brighter: was 40,40,50
         Glow       = Color3.fromRGB(88,  101, 242),
     },
     Animation = {
@@ -99,6 +79,7 @@ local function Create(className, props)
     return inst
 end
 
+-- local Tween — no longer pollutes global environment
 local function Tween(inst, props, duration, easingStyle, easingDir)
     local info = TweenInfo.new(
         duration    or Aurora.Config.Animation.Duration,
@@ -168,11 +149,14 @@ local function MakeDraggable(frame, handle)
         end
     end)
 
-    return conns
+    return conns   -- array of RBXScriptConnections, same type as everything else
 end
 
 -- ─────────────────────────────────────────────
 --  Dropdown collapse registry
+--  Weak keys so frames can be GC'd freely.
+--  CreateDropdown / CreateSearchDropdown register
+--  a collapse function here; SetEnabled calls it.
 -- ─────────────────────────────────────────────
 
 local _dropdownCollapse = setmetatable({}, { __mode = "k" })
@@ -233,7 +217,7 @@ function Aurora:CreateWindow(config)
         BorderSizePixel  = 0,
     })
     AddCorner(TitleBar)
-    Create("Frame", {
+    Create("Frame", {  -- patch bottom corners
         Parent           = TitleBar,
         Position         = UDim2.new(0, 0, 1, -8),
         Size             = UDim2.new(1, 0, 0, 8),
@@ -254,7 +238,7 @@ function Aurora:CreateWindow(config)
         TextXAlignment     = Enum.TextXAlignment.Left,
     })
 
-    --// Control buttons
+    --// Control buttons (✕ / —)
     local function MakeControlBtn(xOffset, icon, iconColor)
         local btn = Create("TextButton", {
             Parent           = TitleBar,
@@ -288,6 +272,8 @@ function Aurora:CreateWindow(config)
     end)
 
     CloseBtn.MouseButton1Click:Connect(function()
+        -- Use AbsolutePosition so the collapse-to-centre is correct
+        -- regardless of where the window has been dragged
         local absPos  = MainFrame.AbsolutePosition
         local absSize = MainFrame.AbsoluteSize
         local cx = absPos.X + absSize.X / 2
@@ -303,10 +289,10 @@ function Aurora:CreateWindow(config)
         ScreenGui:Destroy()
     end)
 
-    --// Tab sidebar
+    --// Tab sidebar — auto-sizing width
     local SIDEBAR_MIN = 110
     local SIDEBAR_MAX = 200
-    local SIDEBAR_GAP = 8
+    local SIDEBAR_GAP = 8   -- gap between sidebar and content
 
     local TabContainer = Create("Frame", {
         Name             = "TabContainer",
@@ -342,12 +328,14 @@ function Aurora:CreateWindow(config)
     })
     AddCorner(ContentContainer)
 
+    -- Reflow ContentContainer whenever the sidebar width changes
     TabContainer:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
         local w = math.clamp(TabContainer.AbsoluteSize.X, SIDEBAR_MIN, SIDEBAR_MAX)
         ContentContainer.Position = UDim2.new(0, 8 + w + SIDEBAR_GAP, 0, 48)
         ContentContainer.Size     = UDim2.new(1, -(8 + w + SIDEBAR_GAP + 8), 1, -56)
     end)
 
+    -- Subtle bottom fade so sparse tabs don't end abruptly
     local FadeGradient = Create("Frame", {
         Parent             = ContentContainer,
         Position           = UDim2.new(0, 0, 1, -28),
@@ -373,7 +361,8 @@ function Aurora:CreateWindow(config)
         ContentContainer = ContentContainer,
         Tabs             = {},
         ActiveTab        = nil,
-        OnTabChanged     = Signal.new(),
+        -- Events
+        OnTabChanged     = Signal.new(),  -- fires (newTab, oldTab)
     }
 
     function Window:SelectTab(index)
@@ -426,7 +415,7 @@ function Aurora:CreateWindow(config)
             Name               = "Label",
             Parent             = TabButton,
             Position           = UDim2.new(0, iconOffset, 0, 0),
-            Size               = UDim2.new(0, 0, 1, 0),
+            Size               = UDim2.new(0, 0, 1, 0),   -- width driven by AutomaticSize
             AutomaticSize      = Enum.AutomaticSize.X,
             BackgroundTransparency = 1,
             Text               = tabName,
@@ -435,6 +424,7 @@ function Aurora:CreateWindow(config)
             TextSize           = 13,
             TextXAlignment     = Enum.TextXAlignment.Left,
         })
+        -- Right padding so text doesn't hug the edge
         Create("UIPadding", {
             Parent       = TabLabel,
             PaddingRight = UDim.new(0, 10),
@@ -460,6 +450,7 @@ function Aurora:CreateWindow(config)
         })
 
         local Tab = {
+            Name           = tabName,
             Button         = TabButton,
             Content        = TabContent,
             Elements       = {},
@@ -467,6 +458,7 @@ function Aurora:CreateWindow(config)
             OnElementAdded = Signal.new(),
         }
 
+        -- Empty state — visible until first element is added
         local EmptyState = Create("TextLabel", {
             Parent             = TabContent,
             Size               = UDim2.new(1, 0, 0, 40),
@@ -522,6 +514,9 @@ function Aurora:CreateWindow(config)
             return f
         end
 
+        -- ownedConns: UIS connections that belong exclusively to this element.
+        -- Added to windowConnections for Window:Destroy() cleanup, AND
+        -- disconnected + pruned immediately when element.Destroy() is called.
         local function RegisterElement(element, frame, ownedConns)
             ownedConns = ownedConns or {}
             for _, c in ipairs(ownedConns) do
@@ -548,26 +543,32 @@ function Aurora:CreateWindow(config)
                 if #Tab.Elements == 0 then EmptyState.Visible = true end
             end
 
+            -- SetVisible: show/hide without removing from Elements list
             element.SetVisible = function(visible)
                 frame.Visible = visible
             end
 
+            -- SetEnabled: dims and blocks interaction when false
             element.SetEnabled = function(enabled)
+                -- Overlay that absorbs all input when disabled
                 local overlay = frame:FindFirstChild("_DisabledOverlay")
                 if enabled then
                     if overlay then overlay:Destroy() end
                     Tween(frame, {BackgroundTransparency = 0}, 0.15)
+                    -- Restore text colours and clear cached value
                     for _, lbl in ipairs(frame:GetDescendants()) do
                         if lbl:IsA("TextLabel") or lbl:IsA("TextButton") or lbl:IsA("TextBox") then
                             if lbl:GetAttribute("_origColor") then
                                 lbl.TextColor3 = Color3.fromHex(lbl:GetAttribute("_origColor"))
-                                lbl:SetAttribute("_origColor", nil)
+                                lbl:SetAttribute("_origColor", nil)  -- clear so theme changes apply correctly next time
                             end
                         end
                     end
                 else
+                    -- Collapse any open dropdown before locking
                     local collapse = _dropdownCollapse[frame]
                     if collapse then collapse() end
+                    -- Store original colours once, dim all text
                     for _, lbl in ipairs(frame:GetDescendants()) do
                         if lbl:IsA("TextLabel") or lbl:IsA("TextButton") or lbl:IsA("TextBox") then
                             if not lbl:GetAttribute("_origColor") then
@@ -702,7 +703,6 @@ function Aurora:CreateWindow(config)
         end
 
         -- ── Slider ────────────────────────────
-        -- FIXED: Added Touch Support
 
         function Tab:CreateSlider(cfg)
             cfg = cfg or {}
@@ -780,31 +780,24 @@ function Aurora:CreateWindow(config)
             end
 
             local c1 = Knob.InputBegan:Connect(function(inp)
-                if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
-                    dragging = true
-                end
+                if inp.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end
             end)
             local c2 = Bar.InputBegan:Connect(function(inp)
-                if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+                if inp.UserInputType == Enum.UserInputType.MouseButton1 then
                     dragging = true
                     Apply(inp.Position.X)
                 end
             end)
-            
-            -- FIX: Listen to Touch movement as well
             local c3 = UserInputService.InputChanged:Connect(function(inp)
-                if dragging and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+                if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
                     Apply(inp.Position.X)
                 end
             end)
-            
-            -- FIX: Handle Touch end
             local c4 = UserInputService.InputEnded:Connect(function(inp)
-                if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
-                    dragging = false
-                end
+                if inp.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
             end)
 
+            -- c1/c2 are frame-local (destroyed with frame); c3/c4 are UIS globals — pass as ownedConns
             return RegisterElement({
                 Frame     = frame,
                 OnChanged = OnChanged,
@@ -910,6 +903,7 @@ function Aurora:CreateWindow(config)
                 Tween(Arrow, {Rotation = expanded and 180 or 0}, 0.2)
             end)
 
+            -- Register collapse so SetEnabled(false) can close an open dropdown
             _dropdownCollapse[DropdownFrame] = function()
                 if expanded then
                     expanded = false
@@ -940,7 +934,7 @@ function Aurora:CreateWindow(config)
             local expanded  = false
             local OnChanged = Signal.new()
             local labelText = cfg.Text or "Search"
-            local MAX_VISIBLE = cfg.MaxVisible or 6
+            local MAX_VISIBLE = cfg.MaxVisible or 6  -- max rows before scroll
             local ROW_H = 30
 
             local DropFrame = Create("Frame", {
@@ -976,6 +970,7 @@ function Aurora:CreateWindow(config)
                 TextSize           = 11,
             })
 
+            -- Search input (shown when expanded)
             local SearchBox = Create("TextBox", {
                 Parent             = DropFrame,
                 Position           = UDim2.new(0, 6, 0, 38),
@@ -993,6 +988,7 @@ function Aurora:CreateWindow(config)
             AddCorner(SearchBox, UDim.new(0, 4))
             Create("UIPadding", {Parent = SearchBox, PaddingLeft = UDim.new(0, 8)})
 
+            -- Scrollable options list
             local ListFrame = Create("ScrollingFrame", {
                 Parent               = DropFrame,
                 Position             = UDim2.new(0, 0, 0, 66),
@@ -1007,6 +1003,7 @@ function Aurora:CreateWindow(config)
             })
             Create("UIListLayout", {Parent = ListFrame, SortOrder = Enum.SortOrder.LayoutOrder})
 
+            -- Build option buttons, store references for filtering
             local optionBtns = {}
             for i, option in ipairs(options) do
                 local ob = Create("TextButton", {
@@ -1032,6 +1029,7 @@ function Aurora:CreateWindow(config)
                     SearchBox.Text    = ""
                     if cfg.Callback then cfg.Callback(option) end
                     OnChanged:Fire(option)
+                    -- Restore all rows and collapse
                     for _, btn in ipairs(optionBtns) do btn.Visible = true end
                     expanded = false
                     Tween(DropFrame, {Size = UDim2.new(1, 0, 0, 36)}, 0.2)
@@ -1040,6 +1038,7 @@ function Aurora:CreateWindow(config)
                 optionBtns[i] = ob
             end
 
+            -- Live filter on search text change
             SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
                 local query = SearchBox.Text:lower()
                 local visible = 0
@@ -1048,6 +1047,7 @@ function Aurora:CreateWindow(config)
                     optionBtns[i].Visible = show
                     if show then visible = visible + 1 end
                 end
+                -- Resize list to visible rows (capped at MAX_VISIBLE)
                 local newH = math.min(visible, MAX_VISIBLE) * ROW_H
                 ListFrame.Size = UDim2.new(1, 0, 0, newH)
                 local totalH = 66 + newH
@@ -1058,6 +1058,7 @@ function Aurora:CreateWindow(config)
                 return 66 + math.min(#options, MAX_VISIBLE) * ROW_H
             end
 
+            -- Toggle on header click
             Create("TextButton", {
                 Parent             = DropFrame,
                 Size               = UDim2.new(1, 0, 0, 36),
@@ -1077,6 +1078,7 @@ function Aurora:CreateWindow(config)
                 end
             end)
 
+            -- Register collapse so SetEnabled(false) can close an open search dropdown
             _dropdownCollapse[DropFrame] = function()
                 if expanded then
                     expanded = false
@@ -1101,11 +1103,12 @@ function Aurora:CreateWindow(config)
         function Tab:CreateMultiSelect(cfg)
             cfg = cfg or {}
             local options   = cfg.Options  or {}
-            local selected  = {}
+            local selected  = {}           -- set: option → true/false
             local expanded  = false
             local OnChanged = Signal.new()
             local labelText = cfg.Text or "Select"
 
+            -- Seed defaults
             for _, opt in ipairs(cfg.Default or {}) do
                 selected[opt] = true
             end
@@ -1177,6 +1180,7 @@ function Aurora:CreateWindow(config)
                     LayoutOrder      = i,
                 })
 
+                -- Checkbox
                 local Box = Create("Frame", {
                     Parent           = row,
                     Position         = UDim2.new(0, 8, 0.5, -8),
@@ -1238,6 +1242,7 @@ function Aurora:CreateWindow(config)
                 end)
             end
 
+            -- Toggle
             Create("TextButton", {
                 Parent             = MultiFrame,
                 Size               = UDim2.new(1, 0, 0, 36),
@@ -1249,6 +1254,7 @@ function Aurora:CreateWindow(config)
                 Tween(Arrow, {Rotation = expanded and 180 or 0}, 0.2)
             end)
 
+            -- Register collapse so SetEnabled(false) closes an open multi-select
             _dropdownCollapse[MultiFrame] = function()
                 if expanded then
                     expanded = false
@@ -1262,9 +1268,11 @@ function Aurora:CreateWindow(config)
                 OnChanged = OnChanged,
                 GetValue  = function() return SelectedList() end,
                 SetValue  = function(vals)
+                    -- vals is an array of selected option strings
                     selected = {}
                     for _, v in ipairs(vals) do selected[v] = true end
                     Label.Text = HeaderText()
+                    -- Sync checkboxes visually
                     for _, row in ipairs(OptionsFrame:GetChildren()) do
                         if row:IsA("Frame") then
                             local box  = row:FindFirstChildWhichIsA("Frame")
@@ -1359,6 +1367,7 @@ function Aurora:CreateWindow(config)
                 TextXAlignment     = Enum.TextXAlignment.Left,
             })
 
+            -- [ − ] [ value ] [ + ]  row
             local Row = Create("Frame", {
                 Parent           = frame,
                 Position         = UDim2.new(0, 10, 0, 26),
@@ -1412,7 +1421,7 @@ function Aurora:CreateWindow(config)
             local function Commit(val)
                 val = math.clamp(math.floor(val / step + 0.5) * step, min, max)
                 if val == current then
-                    NumBox.Text = tostring(current)
+                    NumBox.Text = tostring(current) -- reset display if clamped
                     return
                 end
                 current     = val
@@ -1427,7 +1436,7 @@ function Aurora:CreateWindow(config)
             NumBox.FocusLost:Connect(function()
                 local n = tonumber(NumBox.Text)
                 if n then Commit(n)
-                else NumBox.Text = tostring(current) end
+                else NumBox.Text = tostring(current) end  -- revert invalid input
             end)
 
             return RegisterElement({
@@ -1471,7 +1480,7 @@ function Aurora:CreateWindow(config)
             })
             AddCorner(KeyBtn, UDim.new(0, 4))
 
-            local keyCon
+            local keyCon  -- connection for capturing the next key
 
             local function StopListening()
                 listening = false
@@ -1502,6 +1511,7 @@ function Aurora:CreateWindow(config)
                 if listening then StopListening() else StartListening() end
             end)
 
+            -- Cancel on click elsewhere
             local cancelCon = UserInputService.InputBegan:Connect(function(inp)
                 if listening and inp.UserInputType == Enum.UserInputType.MouseButton1 then
                     StopListening()
@@ -1527,6 +1537,8 @@ function Aurora:CreateWindow(config)
             local OnChanged = Signal.new()
 
             local h, s, v   = Color3.toHSV(color)
+
+            -- Expanded height: 36 header + 6 gap + 68 pads + 6 gap + 22 hex + 10 padding
             local EXPANDED_H = 148
 
             local PickerFrame = Create("Frame", {
@@ -1538,6 +1550,7 @@ function Aurora:CreateWindow(config)
             })
             AddCorner(PickerFrame, UDim.new(0, 4))
 
+            -- Header
             Create("TextLabel", {
                 Parent             = PickerFrame,
                 Position           = UDim2.new(0, 12, 0, 0),
@@ -1559,6 +1572,7 @@ function Aurora:CreateWindow(config)
             })
             AddCorner(Preview, UDim.new(0, 4))
 
+            -- Toggle expand
             Create("TextButton", {
                 Parent             = PickerFrame,
                 Size               = UDim2.new(1, 0, 0, 36),
@@ -1570,6 +1584,7 @@ function Aurora:CreateWindow(config)
                 Tween(PickerFrame, {Size = UDim2.new(1, 0, 0, expanded and EXPANDED_H or 36)}, 0.25)
             end)
 
+            -- Panel container
             local Panel = Create("Frame", {
                 Parent             = PickerFrame,
                 Position           = UDim2.new(0, 8, 0, 44),
@@ -1578,6 +1593,8 @@ function Aurora:CreateWindow(config)
                 BorderSizePixel    = 0,
             })
 
+            -- ── SV Pad ───────────────────────
+            -- Background: pure hue color
             local SVPad = Create("Frame", {
                 Parent           = Panel,
                 Position         = UDim2.new(0, 0, 0, 0),
@@ -1589,6 +1606,7 @@ function Aurora:CreateWindow(config)
             })
             AddCorner(SVPad, UDim.new(0, 4))
 
+            -- White-to-transparent overlay (left = white, right = hue) — controls Saturation
             local WLayer = Create("Frame", {
                 Parent             = SVPad,
                 Size               = UDim2.new(1, 0, 1, 0),
@@ -1599,12 +1617,13 @@ function Aurora:CreateWindow(config)
             Create("UIGradient", {
                 Parent       = WLayer,
                 Transparency = NumberSequence.new({
-                    NumberSequenceKeypoint.new(0, 0),
-                    NumberSequenceKeypoint.new(1, 1),
+                    NumberSequenceKeypoint.new(0, 0),   -- left: opaque white
+                    NumberSequenceKeypoint.new(1, 1),   -- right: transparent (shows hue)
                 }),
                 Rotation = 0,
             })
 
+            -- Transparent-to-black overlay (top = clear, bottom = black) — controls Value
             local BLayer = Create("Frame", {
                 Parent             = SVPad,
                 Size               = UDim2.new(1, 0, 1, 0),
@@ -1615,12 +1634,13 @@ function Aurora:CreateWindow(config)
             Create("UIGradient", {
                 Parent       = BLayer,
                 Transparency = NumberSequence.new({
-                    NumberSequenceKeypoint.new(0, 1),
-                    NumberSequenceKeypoint.new(1, 0),
+                    NumberSequenceKeypoint.new(0, 1),   -- top: transparent
+                    NumberSequenceKeypoint.new(1, 0),   -- bottom: opaque black
                 }),
                 Rotation = 90,
             })
 
+            -- Invisible drag surface (above gradients)
             local SVDrag = Create("TextButton", {
                 Parent             = SVPad,
                 Size               = UDim2.new(1, 0, 1, 0),
@@ -1629,6 +1649,7 @@ function Aurora:CreateWindow(config)
                 ZIndex             = 6,
             })
 
+            -- Cursor dot
             local SVCursor = Create("Frame", {
                 Parent           = SVPad,
                 Size             = UDim2.new(0, 10, 0, 10),
@@ -1640,6 +1661,7 @@ function Aurora:CreateWindow(config)
             })
             AddCorner(SVCursor, UDim.new(1, 0))
 
+            -- ── Hue Bar ──────────────────────
             local HueBar = Create("Frame", {
                 Parent           = Panel,
                 Position         = UDim2.new(1, -20, 0, 0),
@@ -1651,6 +1673,7 @@ function Aurora:CreateWindow(config)
             })
             AddCorner(HueBar, UDim.new(0, 4))
 
+            -- Full-spectrum UIGradient (top→bottom = 0°→360°)
             Create("UIGradient", {
                 Parent   = HueBar,
                 Color    = ColorSequence.new({
@@ -1684,6 +1707,7 @@ function Aurora:CreateWindow(config)
             })
             AddCorner(HueCursor, UDim.new(1, 0))
 
+            -- ── Hex Input ────────────────────
             local HexInput = Create("TextBox", {
                 Parent             = Panel,
                 Position           = UDim2.new(0, 0, 0, 74),
@@ -1703,6 +1727,7 @@ function Aurora:CreateWindow(config)
             AddCorner(HexInput, UDim.new(0, 4))
             Create("UIPadding", {Parent = HexInput, PaddingLeft = UDim.new(0, 8)})
 
+            -- ── Commit ───────────────────────
             local function Commit()
                 color = Color3.fromHSV(h, s, v)
                 Preview.BackgroundColor3 = color
@@ -1717,54 +1742,49 @@ function Aurora:CreateWindow(config)
                 OnChanged:Fire(color)
             end
 
+            -- SV drag
             local svDragging = false
             SVDrag.InputBegan:Connect(function(inp)
-                if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+                if inp.UserInputType == Enum.UserInputType.MouseButton1 then
                     svDragging = true
+                    -- Also sample on initial click
                     s = math.clamp((inp.Position.X - SVPad.AbsolutePosition.X) / SVPad.AbsoluteSize.X, 0, 1)
                     v = 1 - math.clamp((inp.Position.Y - SVPad.AbsolutePosition.Y) / SVPad.AbsoluteSize.Y, 0, 1)
                     Commit()
                 end
             end)
-            
-            -- FIX: Added Touch support
             local svMove = UserInputService.InputChanged:Connect(function(inp)
-                if svDragging and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+                if svDragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
                     s = math.clamp((inp.Position.X - SVPad.AbsolutePosition.X) / SVPad.AbsoluteSize.X, 0, 1)
                     v = 1 - math.clamp((inp.Position.Y - SVPad.AbsolutePosition.Y) / SVPad.AbsoluteSize.Y, 0, 1)
                     Commit()
                 end
             end)
-            
             local svEnd = UserInputService.InputEnded:Connect(function(inp)
-                if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
-                    svDragging = false
-                end
+                if inp.UserInputType == Enum.UserInputType.MouseButton1 then svDragging = false end
             end)
-
+            table.insert(windowConnections, svMove)
+            table.insert(windowConnections, svEnd)
+            -- Hue drag
             local hueDragging = false
             HueDrag.InputBegan:Connect(function(inp)
-                if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+                if inp.UserInputType == Enum.UserInputType.MouseButton1 then
                     hueDragging = true
                     h = math.clamp((inp.Position.Y - HueBar.AbsolutePosition.Y) / HueBar.AbsoluteSize.Y, 0, 1)
                     Commit()
                 end
             end)
-            
-            -- FIX: Added Touch support
             local hueMove = UserInputService.InputChanged:Connect(function(inp)
-                if hueDragging and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+                if hueDragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
                     h = math.clamp((inp.Position.Y - HueBar.AbsolutePosition.Y) / HueBar.AbsoluteSize.Y, 0, 1)
                     Commit()
                 end
             end)
-            
             local hueEnd = UserInputService.InputEnded:Connect(function(inp)
-                if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
-                    hueDragging = false
-                end
+                if inp.UserInputType == Enum.UserInputType.MouseButton1 then hueDragging = false end
             end)
 
+            -- Hex input: parse on Enter
             HexInput.FocusLost:Connect(function(enter)
                 if not enter then return end
                 local hex = HexInput.Text:gsub("#", "")
@@ -1780,6 +1800,7 @@ function Aurora:CreateWindow(config)
                 end
             end)
 
+            -- Register collapse so SetEnabled(false) closes an open picker
             _dropdownCollapse[PickerFrame] = function()
                 if expanded then
                     expanded = false
@@ -1787,7 +1808,6 @@ function Aurora:CreateWindow(config)
                 end
             end
 
-            -- FIX: Clean up redundant manual connection insertion
             return RegisterElement({
                 Frame     = PickerFrame,
                 OnChanged = OnChanged,
@@ -1842,6 +1862,7 @@ function Aurora:CreateWindow(config)
                 TextSize           = 11,
                 TextXAlignment     = Enum.TextXAlignment.Left,
             })
+            -- Higher contrast divider
             Create("Frame", {
                 Parent           = frame,
                 Position         = UDim2.new(0, 0, 1, -1),
@@ -1858,7 +1879,6 @@ function Aurora:CreateWindow(config)
         end
 
         -- ── Table ─────────────────────────────
-        -- FIXED: Optimized RemoveRow performance
 
         function Tab:CreateTable(cfg)
             cfg = cfg or {}
@@ -1872,6 +1892,7 @@ function Aurora:CreateWindow(config)
             local numCols  = #columns
             local colW     = 1 / numCols
 
+            -- Outer frame: header + scrollable body
             local TableFrame = Create("Frame", {
                 Parent           = TabContent,
                 Size             = UDim2.new(1, 0, 0, headerH + math.min(#rows, maxRows) * rowH),
@@ -1881,6 +1902,7 @@ function Aurora:CreateWindow(config)
             })
             AddCorner(TableFrame, UDim.new(0, 4))
 
+            -- ── Header row ───────────────────
             local Header = Create("Frame", {
                 Parent           = TableFrame,
                 Size             = UDim2.new(1, 0, 0, headerH),
@@ -1889,6 +1911,7 @@ function Aurora:CreateWindow(config)
                 ClipsDescendants = true,
             })
             AddCorner(Header, UDim.new(0, 4))
+            -- Patch bottom corners of header so it sits flush on the body
             Create("Frame", {
                 Parent           = Header,
                 Position         = UDim2.new(0, 0, 1, -6),
@@ -1910,6 +1933,7 @@ function Aurora:CreateWindow(config)
                     TextXAlignment     = Enum.TextXAlignment.Left,
                     TextTruncate       = Enum.TextTruncate.AtEnd,
                 })
+                -- Column divider (skip after last)
                 if i < numCols then
                     Create("Frame", {
                         Parent           = Header,
@@ -1922,6 +1946,7 @@ function Aurora:CreateWindow(config)
                 end
             end
 
+            -- ── Scrollable body ──────────────
             local Body = Create("ScrollingFrame", {
                 Parent               = TableFrame,
                 Position             = UDim2.new(0, 0, 0, headerH),
@@ -1934,9 +1959,11 @@ function Aurora:CreateWindow(config)
                 CanvasSize           = UDim2.new(0, 0, 0, 0),
                 ClipsDescendants     = true,
             })
+            -- Round only the bottom corners
             AddCorner(Body, UDim.new(0, 4))
             Create("UIListLayout", {Parent = Body, SortOrder = Enum.SortOrder.LayoutOrder})
 
+            -- Internal: render a single row
             local rowObjects = {}
             local function RenderRow(rowData, index)
                 local isEven   = index % 2 == 0
@@ -1963,6 +1990,7 @@ function Aurora:CreateWindow(config)
                     })
                 end
 
+                -- Hover + click
                 local rowBtn = Create("TextButton", {
                     Parent             = rowFrame,
                     Size               = UDim2.new(1, 0, 1, 0),
@@ -1982,22 +2010,27 @@ function Aurora:CreateWindow(config)
                 return rowFrame
             end
 
+            -- Render initial rows
             for i, rowData in ipairs(rows) do
                 rowObjects[i] = RenderRow(rowData, i)
             end
 
+            -- Resize outer frame to fit visible rows
             local function Resize()
                 local visible = math.min(#rows, maxRows)
                 TableFrame.Size = UDim2.new(1, 0, 0, headerH + visible * rowH)
             end
             Resize()
 
+            -- Element API
             local element = {
                 Frame        = TableFrame,
                 OnRowClicked = OnRowClicked,
 
+                -- Replace all rows at once
                 SetRows = function(newRows)
                     rows = newRows
+                    -- Clear existing
                     for _, obj in ipairs(rowObjects) do obj:Destroy() end
                     rowObjects = {}
                     for i, rowData in ipairs(rows) do
@@ -2006,6 +2039,7 @@ function Aurora:CreateWindow(config)
                     Resize()
                 end,
 
+                -- Append a single row
                 AddRow = function(rowData)
                     table.insert(rows, rowData)
                     local i = #rows
@@ -2013,35 +2047,24 @@ function Aurora:CreateWindow(config)
                     Resize()
                 end,
 
-                -- OPTIMIZED: Update subsequent rows instead of destroying all
+                -- Remove a row by index (1-based)
                 RemoveRow = function(index)
                     if not rows[index] then return end
-                    
-                    -- Destroy the specific frame
-                    if rowObjects[index] then
-                        rowObjects[index]:Destroy()
-                    end
-                    
-                    -- Remove from data tables
                     table.remove(rows, index)
-                    table.remove(rowObjects, index)
-                    
-                    -- Update visual state for shifted rows
-                    for i = index, #rows do
-                        local frame = rowObjects[i]
-                        if frame then
-                            frame.LayoutOrder = i
-                            local isEven = i % 2 == 0
-                            frame.BackgroundColor3 = isEven and Aurora.Config.Theme.Surface or Aurora.Config.Theme.Background
-                        end
+                    -- Re-render all (alternating colours need reindex)
+                    for _, obj in ipairs(rowObjects) do obj:Destroy() end
+                    rowObjects = {}
+                    for i, rowData in ipairs(rows) do
+                        rowObjects[i] = RenderRow(rowData, i)
                     end
-                    
                     Resize()
                 end,
 
+                -- Update a single cell without full re-render
                 SetCell = function(rowIndex, colIndex, value)
                     if not rows[rowIndex] then return end
                     rows[rowIndex][colIndex] = value
+                    -- Find and update label directly
                     local rowFrame = rowObjects[rowIndex]
                     if rowFrame then
                         local labels = {}
@@ -2050,6 +2073,7 @@ function Aurora:CreateWindow(config)
                                 table.insert(labels, c)
                             end
                         end
+                        -- Labels are ordered by Position.X.Scale
                         table.sort(labels, function(a, b)
                             return a.Position.X.Scale < b.Position.X.Scale
                         end)
@@ -2059,6 +2083,7 @@ function Aurora:CreateWindow(config)
                     end
                 end,
 
+                -- Clear all rows
                 Clear = function()
                     rows = {}
                     for _, obj in ipairs(rowObjects) do obj:Destroy() end
@@ -2066,7 +2091,12 @@ function Aurora:CreateWindow(config)
                     Resize()
                 end,
 
-                GetRows = function() return rows end,
+                GetRows = function()
+                    -- Return a copy so callers can't mutate internal state
+                    local copy = {}
+                    for i, row in ipairs(rows) do copy[i] = row end
+                    return copy
+                end,
             }
 
             return RegisterElement(element, TableFrame)
@@ -2087,6 +2117,7 @@ function Aurora:CreateWindow(config)
         table.insert(windowConnections, c)
     end
 
+    -- Intro animation
     MainFrame.Size     = UDim2.new(0, 0, 0, 0)
     MainFrame.Position = UDim2.new(
         position.X.Scale, position.X.Offset + size.X.Offset / 2,
