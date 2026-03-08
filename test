@@ -1,6 +1,6 @@
 --// Aurora UI Library
 --// A minimalistic, beautiful UI library for Roblox
---// Version: 6.3.0
+--// Version: 6.4.0
 
 local Aurora = {}
 local TweenService     = game:GetService("TweenService")
@@ -329,11 +329,12 @@ function Aurora:CreateWindow(config)
     AddCorner(ContentContainer)
 
     -- Reflow ContentContainer whenever the sidebar width changes
-    TabContainer:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+    local reflowConn = TabContainer:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
         local w = math.clamp(TabContainer.AbsoluteSize.X, SIDEBAR_MIN, SIDEBAR_MAX)
         ContentContainer.Position = UDim2.new(0, 8 + w + SIDEBAR_GAP, 0, 48)
         ContentContainer.Size     = UDim2.new(1, -(8 + w + SIDEBAR_GAP + 8), 1, -56)
     end)
+    table.insert(windowConnections, reflowConn)
 
     -- Subtle bottom fade so sparse tabs don't end abruptly
     local FadeGradient = Create("Frame", {
@@ -498,6 +499,45 @@ function Aurora:CreateWindow(config)
 
         Tab.Activate = Activate
         TabButton.MouseButton1Click:Connect(Activate)
+
+        -- SetBadge(text, color): show a small bubble on the tab button.
+        --   text  (string|number|nil) — content; pass nil or "" to remove badge
+        --   color (Color3|nil)        — badge background (defaults to Theme.Primary)
+        local _badge = nil
+        function Tab:SetBadge(text, color)
+            color = color or Aurora.Config.Theme.Primary
+            if text == nil or tostring(text) == "" then
+                -- Remove badge
+                if _badge then _badge:Destroy() _badge = nil end
+                return
+            end
+            if not _badge then
+                _badge = Create("Frame", {
+                    Name             = "_Badge",
+                    Parent           = TabButton,
+                    AnchorPoint      = Vector2.new(1, 0),
+                    Position         = UDim2.new(1, -2, 0, 2),
+                    Size             = UDim2.new(0, 18, 0, 14),
+                    BackgroundColor3 = color,
+                    BorderSizePixel  = 0,
+                    ZIndex           = 10,
+                })
+                AddCorner(_badge, UDim.new(1, 0))
+                Create("TextLabel", {
+                    Name               = "_BadgeLabel",
+                    Parent             = _badge,
+                    Size               = UDim2.new(1, 0, 1, 0),
+                    BackgroundTransparency = 1,
+                    TextColor3         = Color3.new(1, 1, 1),
+                    Font               = Aurora.Config.FontBold,
+                    TextSize           = 9,
+                    ZIndex             = 11,
+                })
+            end
+            _badge.BackgroundColor3 = color
+            local lbl = _badge:FindFirstChild("_BadgeLabel")
+            if lbl then lbl.Text = tostring(text) end
+        end
 
         -- ─────────────────────────────────────
         --  Element helpers
@@ -1846,6 +1886,101 @@ function Aurora:CreateWindow(config)
             }, frame)
         end
 
+
+        -- ── ProgressBar ───────────────────────
+        --  A read-only animated progress bar.
+        --  cfg.Text      (string)  — label shown above the bar
+        --  cfg.Default   (number)  — initial fill 0–1 (default 0)
+        --  cfg.Color     (Color3)  — fill colour (defaults to Theme.Primary)
+        --  cfg.ShowPct   (bool)    — show "42%" label on the right (default true)
+
+        function Tab:CreateProgressBar(cfg)
+            cfg = cfg or {}
+            local value     = math.clamp(cfg.Default or 0, 0, 1)
+            local fillColor = cfg.Color or Aurora.Config.Theme.Primary
+            local showPct   = cfg.ShowPct ~= false
+            local OnChanged = Signal.new()
+            local frame     = BaseFrame(46)
+
+            -- Label text (top-left)
+            local TitleLbl = Create("TextLabel", {
+                Parent             = frame,
+                Position           = UDim2.new(0, 12, 0, 6),
+                Size               = UDim2.new(1, showPct and -52 or -24, 0, 14),
+                BackgroundTransparency = 1,
+                Text               = cfg.Text or "Progress",
+                TextColor3         = Aurora.Config.Theme.TextMuted,
+                Font               = Aurora.Config.FontMedium,
+                TextSize           = 12,
+                TextXAlignment     = Enum.TextXAlignment.Left,
+            })
+
+            -- Percentage label (top-right)
+            local PctLbl
+            if showPct then
+                PctLbl = Create("TextLabel", {
+                    Parent             = frame,
+                    Position           = UDim2.new(1, -50, 0, 6),
+                    Size               = UDim2.new(0, 40, 0, 14),
+                    BackgroundTransparency = 1,
+                    Text               = math.floor(value * 100) .. "%",
+                    TextColor3         = fillColor,
+                    Font               = Aurora.Config.FontBold,
+                    TextSize           = 12,
+                    TextXAlignment     = Enum.TextXAlignment.Right,
+                })
+            end
+
+            -- Track
+            local Track = Create("Frame", {
+                Parent           = frame,
+                Position         = UDim2.new(0, 12, 0, 28),
+                Size             = UDim2.new(1, -24, 0, 8),
+                BackgroundColor3 = Aurora.Config.Theme.Border,
+                BorderSizePixel  = 0,
+            })
+            AddCorner(Track, UDim.new(1, 0))
+
+            -- Fill
+            local Fill = Create("Frame", {
+                Parent           = Track,
+                Size             = UDim2.new(math.max(value, 0.01), 0, 1, 0),
+                BackgroundColor3 = fillColor,
+                BorderSizePixel  = 0,
+            })
+            AddCorner(Fill, UDim.new(1, 0))
+
+            local element = RegisterElement({
+                Frame     = frame,
+                OnChanged = OnChanged,
+
+                -- SetValue(n): animate fill to n (0–1)
+                SetValue = function(n)
+                    n = math.clamp(n, 0, 1)
+                    value = n
+                    Tween(Fill, {Size = UDim2.new(math.max(n, 0.01), 0, 1, 0)}, 0.3)
+                    if PctLbl then PctLbl.Text = math.floor(n * 100) .. "%" end
+                    OnChanged:Fire(n)
+                end,
+
+                GetValue = function() return value end,
+
+                -- SetLabel(text): update the title label
+                SetLabel = function(text)
+                    TitleLbl.Text = tostring(text)
+                end,
+
+                -- SetColor(Color3): change fill colour
+                SetColor = function(c)
+                    fillColor = c
+                    Fill.BackgroundColor3 = c
+                    if PctLbl then PctLbl.TextColor3 = c end
+                end,
+            }, frame)
+
+            return element
+        end
+
         function Tab:CreateSection(sectionText)
             local frame = Create("Frame", {
                 Parent             = TabContent,
@@ -1877,6 +2012,31 @@ function Aurora:CreateWindow(config)
                 SetText  = function(t) sectionLabel.Text = tostring(t):upper() end,
             }, frame)
         end
+
+        -- ── Separator ─────────────────────────
+        --  A simple horizontal divider line.
+        --  Lighter-weight visual break than CreateSection.
+        --  cfg.Opacity (number 0–1, default 0.7)
+
+        function Tab:CreateSeparator(cfg)
+            cfg = cfg or {}
+            local opacity = cfg.Opacity or 0.7
+            local frame = Create("Frame", {
+                Parent             = TabContent,
+                Size               = UDim2.new(1, 0, 0, 10),
+                BackgroundTransparency = 1,
+            })
+            Create("Frame", {
+                Parent           = frame,
+                Position         = UDim2.new(0, 0, 0.5, 0),
+                Size             = UDim2.new(1, 0, 0, 1),
+                BackgroundColor3 = Aurora.Config.Theme.Border,
+                BackgroundTransparency = opacity,
+                BorderSizePixel  = 0,
+            })
+            return RegisterElement({ Frame = frame }, frame)
+        end
+
 
         -- ── Table ─────────────────────────────
 
@@ -1965,12 +2125,14 @@ function Aurora:CreateWindow(config)
 
             -- Internal: render a single row
             local rowObjects = {}
+            local rowColors  = {}  -- index → Color3 override (nil = default alternating)
             local function RenderRow(rowData, index)
                 local isEven   = index % 2 == 0
+                local defaultColor = isEven and Aurora.Config.Theme.Surface or Aurora.Config.Theme.Background
                 local rowFrame = Create("Frame", {
                     Parent           = Body,
                     Size             = UDim2.new(1, 0, 0, rowH),
-                    BackgroundColor3 = isEven and Aurora.Config.Theme.Surface or Aurora.Config.Theme.Background,
+                    BackgroundColor3 = rowColors[index] or defaultColor,
                     BorderSizePixel  = 0,
                     LayoutOrder      = index,
                 })
@@ -2001,7 +2163,8 @@ function Aurora:CreateWindow(config)
                     Tween(rowFrame, {BackgroundColor3 = Color3.fromRGB(40, 40, 55)}, 0.12)
                 end)
                 rowBtn.MouseLeave:Connect(function()
-                    Tween(rowFrame, {BackgroundColor3 = isEven and Aurora.Config.Theme.Surface or Aurora.Config.Theme.Background}, 0.12)
+                    local defaultColor = isEven and Aurora.Config.Theme.Surface or Aurora.Config.Theme.Background
+                    Tween(rowFrame, {BackgroundColor3 = rowColors[index] or defaultColor}, 0.12)
                 end)
                 rowBtn.MouseButton1Click:Connect(function()
                     OnRowClicked:Fire(index, rowData)
@@ -2096,6 +2259,29 @@ function Aurora:CreateWindow(config)
                     local copy = {}
                     for i, row in ipairs(rows) do copy[i] = row end
                     return copy
+                end,
+
+                -- SetRowColor(index, color): tint a row (pass nil to clear)
+                SetRowColor = function(index, color)
+                    rowColors[index] = color
+                    local obj = rowObjects[index]
+                    if obj then
+                        if color then
+                            Tween(obj, {BackgroundColor3 = color}, 0.2)
+                        else
+                            local isEven = index % 2 == 0
+                            Tween(obj, {BackgroundColor3 = isEven and Aurora.Config.Theme.Surface or Aurora.Config.Theme.Background}, 0.2)
+                        end
+                    end
+                end,
+
+                -- ClearRowColors(): remove all colour overrides
+                ClearRowColors = function()
+                    rowColors = {}
+                    for i, obj in ipairs(rowObjects) do
+                        local isEven = i % 2 == 0
+                        Tween(obj, {BackgroundColor3 = isEven and Aurora.Config.Theme.Surface or Aurora.Config.Theme.Background}, 0.2)
+                    end
                 end,
             }
 
