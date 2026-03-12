@@ -8,7 +8,7 @@ local UserInputService = game:GetService("UserInputService")
 local Players          = game:GetService("Players")
 local LocalPlayer      = Players.LocalPlayer
 
--- Built: 2026-03-12 08:51 UTC
+-- Built: 2026-03-12 09:03 UTC
 
 -- ────────────────────────────────────────────────────────────────────────
 --  Lightweight pub/sub event system
@@ -2132,22 +2132,25 @@ return function(self, cfg)
     -- ── Expose Create* via proxy ─────────────────────────────────────────────
     -- Each method calls the Tab factory with `proxy` as self so elements are
     -- parented to InnerFrame rather than tab.Content.
-    element.CreateButton         = function(_, c) return Tab.CreateButton(proxy, c) end
-    element.CreateToggle         = function(_, c) return Tab.CreateToggle(proxy, c) end
-    element.CreateSlider         = function(_, c) return Tab.CreateSlider(proxy, c) end
-    element.CreateDropdown       = function(_, c) return Tab.CreateDropdown(proxy, c) end
-    element.CreateSearchDropdown = function(_, c) return Tab.CreateSearchDropdown(proxy, c) end
-    element.CreateMultiSelect    = function(_, c) return Tab.CreateMultiSelect(proxy, c) end
-    element.CreateInput          = function(_, c) return Tab.CreateInput(proxy, c) end
-    element.CreateNumberInput    = function(_, c) return Tab.CreateNumberInput(proxy, c) end
-    element.CreateKeybind        = function(_, c) return Tab.CreateKeybind(proxy, c) end
-    element.CreateColorPicker    = function(_, c) return Tab.CreateColorPicker(proxy, c) end
-    element.CreateLabel          = function(_, c) return Tab.CreateLabel(proxy, c) end
-    element.CreateSection        = function(_, c) return Tab.CreateSection(proxy, c) end
-    element.CreateProgressBar    = function(_, c) return Tab.CreateProgressBar(proxy, c) end
-    element.CreateStatusLabel    = function(_, c) return Tab.CreateStatusLabel(proxy, c) end
-    element.CreateTable          = function(_, c) return Tab.CreateTable(proxy, c) end
-    element.CreateRow            = function(_, c) return Tab.CreateRow(proxy, c) end
+    -- Use `self` (the tab instance) rather than the `Tab` upvalue — Tab is defined
+    -- after _AccordionSection in the build chain so the upvalue would be nil.
+    -- self.CreateX resolves through Tab.__index at call time, which is fine.
+    element.CreateButton         = function(_, c) return self.CreateButton(proxy, c) end
+    element.CreateToggle         = function(_, c) return self.CreateToggle(proxy, c) end
+    element.CreateSlider         = function(_, c) return self.CreateSlider(proxy, c) end
+    element.CreateDropdown       = function(_, c) return self.CreateDropdown(proxy, c) end
+    element.CreateSearchDropdown = function(_, c) return self.CreateSearchDropdown(proxy, c) end
+    element.CreateMultiSelect    = function(_, c) return self.CreateMultiSelect(proxy, c) end
+    element.CreateInput          = function(_, c) return self.CreateInput(proxy, c) end
+    element.CreateNumberInput    = function(_, c) return self.CreateNumberInput(proxy, c) end
+    element.CreateKeybind        = function(_, c) return self.CreateKeybind(proxy, c) end
+    element.CreateColorPicker    = function(_, c) return self.CreateColorPicker(proxy, c) end
+    element.CreateLabel          = function(_, c) return self.CreateLabel(proxy, c) end
+    element.CreateSection        = function(_, c) return self.CreateSection(proxy, c) end
+    element.CreateProgressBar    = function(_, c) return self.CreateProgressBar(proxy, c) end
+    element.CreateStatusLabel    = function(_, c) return self.CreateStatusLabel(proxy, c) end
+    element.CreateTable          = function(_, c) return self.CreateTable(proxy, c) end
+    element.CreateRow            = function(_, c) return self.CreateRow(proxy, c) end
 
     -- ── Override Destroy to cascade to children ──────────────────────────────
     local parentDestroy = element.Destroy
